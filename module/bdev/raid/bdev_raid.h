@@ -46,6 +46,45 @@ enum raid_bdev_state {
 typedef void (*raid_bdev_remove_base_bdev_cb)(void *ctx, int status);
 
 /*
+ * Superblock for operation with metadata of the base bdev which part of some raid.
+ * It stores some metadata of the base bdev and the raid
+ */
+struct raid_superblock {
+    /* SPDK raid magic number "SKRd" */
+    uint32_t        magic;
+
+    /* The version of metadata. Currently, only 01 version exists */
+    uint32_t        version;
+
+    /* Logical block size of base bdev */
+    uint32_t        blocklen;
+
+    /* Number of base bdevs */
+    uint8_t         num_base_bdevs;
+
+    /* Raid Level of device's raid */
+    enum raid_level level;
+
+    /* Position of device in raid */
+    uint32_t        array_position;
+
+    /* strip size of device's raid in blocks */
+    uint32_t        strip_size;
+
+    /* Number of blocks held by this base bdev */
+    uint64_t        blockcnt;
+
+    /* Number of blocks held by device's raid */
+    uint64_t        raid_blockcnt;
+
+    /* Timestamp to know the freshest device in raid */
+    struct timespec timestamp;
+
+    /* UUID of this base bdev */
+    struct spdk_uuid uuid;
+};
+
+/*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
  * raid. This structure contains the per base bdev information. Whatever is
  * required per base device for raid bdev will be kept here
@@ -59,6 +98,9 @@ struct raid_base_bdev_info {
 
 	/* pointer to base bdev descriptor opened by raid bdev */
 	struct spdk_bdev_desc	*desc;
+
+    /* base bdev's superblock */
+    struct raid_superblock  *raid_sb;
 
 	/* offset in blocks from the start of the base bdev to the start of the data region */
 	uint64_t		data_offset;
