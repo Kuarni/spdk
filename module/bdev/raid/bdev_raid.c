@@ -1217,6 +1217,8 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
         return 0;
     }
 
+    base_info->raid_bdev->is_new = false;
+
     if (!*freshest) {
         *freshest = base_info;
         return 0;
@@ -1232,6 +1234,56 @@ bad:
     base_info->sb_loaded = false;
     return rc;
 }
+
+static int
+raid_bdev_sb_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info *base_info)
+{
+    int rc = 0;
+    struct raid_superblock *sb = base_info->raid_sb;
+
+    assert(raid->num_base_bdevs == raid->num_base_bdevs_discovered);
+
+    raid->num_base_bdevs = sb->num_base_bdevs;
+    raid->num_base_bdevs_discovered = sb->num_base_bdevs;
+    raid->level = sb->level;
+    raid->bdev.blocklen = sb->blocklen;
+    raid->bdev.blockcnt = sb->raid_blockcnt;
+    raid->bdev.uuid = sb->uuid;
+    raid->strip_size = sb->strip_size;
+    raid->strip_size_kb = sb->strip_size * sb->blocklen;
+}
+
+static int
+raid_bdev_base_bdev_sb_validate(struct raid_base_bdev_info *base_info)
+{
+    int rc = 0;
+    struct raid_superblock *sb = base_info->raid_sb;
+    struct raid_bdev *raid = base_info->raid_bdev;
+
+    if (raid->num_base_bdevs <= 0 || !sb)
+        return 0;
+
+    if (raid->is_new && raid_bdev_sb_init_validation(raid, base_info))
+        return -EINVAL;
+
+    if (sb->version != RAID_METADATA_VERSION_01) {
+        SPDK_ERRLOG("Unsupported version of raid metadata has been found in base bdev '%s' superblock\n", base_info->name);
+        return -EINVAL;
+    }
+
+    if (!raid->is_new) {
+        sb->blocklen = raid->bdev.blocklen;
+        sb->blockcnt = spdk_bdev_desc_get_bdev(base_info->desc)->blockcnt;
+        sb->raid_blockcnt = raid->bdev.blockcnt;
+
+        if (sb->array_position != base_info->position)
+            SPDK_WARNLOG("The base bdev '%s' has changed position in the raid from '%n' to '%n'\n", base_info->name,
+                          sb->array_position, base_info->position);
+    }
+
+    return rc;
+}
+
 /*
  * brief:
  * If raid bdev config is complete, then only register the raid bdev to
