@@ -1116,6 +1116,119 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 	return 0;
 }
 
+static int
+raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+    struct raid_base_bdev_info *base_info = cb_arg;
+
+    if (success) {
+        SPDK_NOTICELOG("Read superblock from base bdev : %s\n", base_info->name);
+    } else {
+        SPDK_ERRLOG("base bdev '%s' superblock io read error\n", base_info->name);
+    }
+
+    spdk_bdev_free_io(bdev_io);
+
+    base_info->sb_loaded = true;
+}
+
+static int
+raid_bdev_load_base_bdevs_sb(struct raid_base_bdev_info *base_info, uint32_t sb_size)
+{
+    struct spdk_io_channel *ch;
+    struct spdk_bdev_channel *ctx;
+    struct spdk_bdev_io *bdev_io;
+
+    if (base_info->sb_loaded)
+        return 0;
+
+    ch = spdk_bdev_get_io_channel(base_info->desc);
+
+    if (!ch) {
+        SPDK_ERRLOG("Unable to create io channel for bdev '%s'\n", base_info->name);
+        return -ENOMEM;
+    }
+
+    ctx = spdk_io_channel_get_ctx(ch);
+
+    spdk_bdev_read_blocks(base_info->desc, ch, base_info->raid_sb, 0,
+                          sb_size, (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_read_sb_compete,
+                          base_info);
+    return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
+{
+    struct raid_superblock *sb = base_info->raid_sb;
+    struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+    struct raid_bdev *raid = base_info->raid_bdev;
+
+    sb->magic = RAID_SUPERBLOCK_MAGIC;
+    sb->version = RAID_METADATA_VERSION_01;
+    sb->blocklen = base_bdev->blocklen;
+    sb->phys_blocklen = base_bdev->phys_blocklen;
+    sb->num_base_bdevs = raid->num_base_bdevs;
+    sb->level = raid->level;
+    sb->array_position = base_info->position;
+    sb->strip_size = raid->strip_size;
+    sb->blockcnt = base_bdev->blockcnt;
+    sb->raid_blockcnt = raid->bdev.blockcnt;
+
+    clock_gettime(CLOCK_REALTIME, &sb->timestamp);
+
+    sb->uuid = raid->bdev.uuid;
+    return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_superblock **freshest)
+{
+    int rc = 0;
+    uint32_t sb_blocks = spdk_divide_round_up(sizeof(struct raid_superblock),
+                                              spdk_bdev_desc_get_bdev(base_info->desc)->blocklen);
+
+    base_info->raid_sb = calloc(1, sb_blocks);
+    if (!base_info->raid_sb) {
+        SPDK_ERRLOG("Failed to allocate memory for raid_sb\n");
+        return -ENOMEM;
+    }
+
+    rc = raid_bdev_load_base_bdevs_sb(base_info, sb_blocks);
+    if (rc) {
+        SPDK_ERRLOG("Failed while read superblock from base bdev '%s'\n", base_info->name);
+        goto clean;
+    }
+
+    struct raid_superblock *sb = base_info->raid_sb;
+
+    if (sb->magic != RAID_SUPERBLOCK_MAGIC)
+        base_info->is_new = true;
+
+    if (base_info->is_new) {
+        rc = raid_bdev_base_bdev_super_sync(base_info);
+        if (rc) {
+            SPDK_ERRLOG("Failed in super_sync for base bdev '%s'\n", base_info->name);
+            goto clean;
+        }
+
+        *freshest = *freshest ? : sb;
+        return 0;
+    }
+
+    if (!*freshest) {
+        *freshest = sb;
+        return 0;
+    }
+
+    *freshest = (*freshest)->timestamp.tv_nsec > sb->timestamp.tv_nsec ? *freshest : sb;
+    return 0;
+
+clean:
+    free(base_info->raid_sb);
+    base_info->raid_sb = NULL;
+    base_info->sb_loaded = false;
+    return rc;
+}
 /*
  * brief:
  * If raid bdev config is complete, then only register the raid bdev to
