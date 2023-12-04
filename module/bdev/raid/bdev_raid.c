@@ -221,6 +221,9 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 	free(base_info->name);
 	base_info->name = NULL;
 
+    free(base_info->raid_sb);
+    base_info->raid_sb = NULL;
+
 	if (base_info->desc == NULL) {
 		return;
 	}
