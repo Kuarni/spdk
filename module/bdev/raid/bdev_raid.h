@@ -108,6 +108,15 @@ struct raid_base_bdev_info {
 	/* pointer to base bdev descriptor opened by raid bdev */
 	struct spdk_bdev_desc	*desc;
 
+    /* position of the base bdev in raid_bdev's base_bdev_info (slot) */
+    uint32_t position;
+
+    /* indicate if the metadata was on disk or not */
+    bool is_new;
+
+    /* true if sb has loaded */
+    bool sb_loaded;
+
     /* base bdev's superblock */
     struct raid_superblock  *raid_sb;
 
@@ -189,6 +198,9 @@ struct raid_bdev {
 
 	/* state of raid bdev */
 	enum raid_bdev_state		state;
+
+    /* indicate if raid is new for raid_bdev_base_bdev_sb_validate */
+    bool                is_new;
 
 	/* number of base bdevs comprising raid bdev  */
 	uint8_t				num_base_bdevs;
