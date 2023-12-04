@@ -1199,7 +1199,7 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
     rc = raid_bdev_load_base_bdevs_sb(base_info, sb_blocks);
     if (rc) {
         SPDK_ERRLOG("Failed while read superblock from base bdev '%s'\n", base_info->name);
-        goto clean;
+        goto bad;
     }
 
     struct raid_superblock *sb = base_info->raid_sb;
@@ -1211,7 +1211,7 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
         rc = raid_bdev_base_bdev_super_sync(base_info);
         if (rc) {
             SPDK_ERRLOG("Failed in super_sync for base bdev '%s'\n", base_info->name);
-            goto clean;
+            goto bad;
         }
 
         *freshest = *freshest ? : sb;
@@ -1226,9 +1226,7 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
     *freshest = (*freshest)->timestamp.tv_nsec > sb->timestamp.tv_nsec ? *freshest : sb;
     return 0;
 
-clean:
-    free(base_info->raid_sb);
-    base_info->raid_sb = NULL;
+bad:
     base_info->sb_loaded = false;
     return rc;
 }
