@@ -1165,6 +1165,7 @@ raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
     struct raid_superblock *sb = base_info->raid_sb;
     struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
     struct raid_bdev *raid = base_info->raid_bdev;
+    struct timespec time_0 = {.tv_nsec = 0, .tv_sec = 0};
 
     sb->magic = RAID_SUPERBLOCK_MAGIC;
     sb->version = RAID_METADATA_VERSION_01;
@@ -1176,15 +1177,13 @@ raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
     sb->strip_size = raid->strip_size;
     sb->blockcnt = base_bdev->blockcnt;
     sb->raid_blockcnt = raid->bdev.blockcnt;
-
-    clock_gettime(CLOCK_REALTIME, &sb->timestamp);
-
+    sb->timestamp = time_0;
     sb->uuid = raid->bdev.uuid;
     return 0;
 }
 
 static int
-raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_superblock **freshest)
+raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_base_bdev_info **freshest)
 {
     int rc = 0;
     uint32_t sb_blocks = spdk_divide_round_up(sizeof(struct raid_superblock),
@@ -1214,16 +1213,19 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
             goto bad;
         }
 
-        *freshest = *freshest ? : sb;
+        *freshest = *freshest ? : base_info;
         return 0;
     }
 
     if (!*freshest) {
-        *freshest = sb;
+        *freshest = base_info;
         return 0;
     }
 
-    *freshest = (*freshest)->timestamp.tv_nsec > sb->timestamp.tv_nsec ? *freshest : sb;
+    if ((*freshest)->raid_sb->timestamp.tv_sec <= sb->timestamp.tv_sec &&
+        (*freshest)->raid_sb->timestamp.tv_nsec < sb->timestamp.tv_nsec)
+        *freshest = base_info;
+
     return 0;
 
 bad:
