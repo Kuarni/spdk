@@ -11,6 +11,8 @@
 
 #define RAID_BDEV_MIN_DATA_OFFSET_SIZE	(1024*1024) /* 1 MiB */
 
+#define RAID_SUPERBLOCK_MAGIC 0x534B5244 /* "SKRD" */
+
 enum raid_level {
 	INVALID_RAID_LEVEL	= -1,
 	RAID0			= 0,
@@ -45,19 +47,26 @@ enum raid_bdev_state {
 
 typedef void (*raid_bdev_remove_base_bdev_cb)(void *ctx, int status);
 
+enum metadata_version {
+    RAID_METADATA_VERSION_01 = 01
+};
+
 /*
  * Superblock for operation with metadata of the base bdev which part of some raid.
  * It stores some metadata of the base bdev and the raid
  */
 struct raid_superblock {
-    /* SPDK raid magic number "SKRd" */
+    /* SPDK raid magic number "SKRD" */
     uint32_t        magic;
 
     /* The version of metadata. Currently, only 01 version exists */
-    uint32_t        version;
+    enum metadata_version   version;
 
     /* Logical block size of base bdev */
     uint32_t        blocklen;
+
+    /* Physical block size of base bdev */
+    uint32_t        phys_blocklen;
 
     /* Number of base bdevs */
     uint8_t         num_base_bdevs;
@@ -80,7 +89,7 @@ struct raid_superblock {
     /* Timestamp to know the freshest device in raid */
     struct timespec timestamp;
 
-    /* UUID of this base bdev */
+    /* UUID of raid bdev */
     struct spdk_uuid uuid;
 };
 
