@@ -1270,6 +1270,54 @@ raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
 
     return 0;
 }
+
+static int
+raid_bdev_base_bdev_capture_super_validate(struct raid_base_bdev_info *base_info) {
+    struct raid_superblock *sb = base_info->raid_sb;
+    struct raid_bdev *raid = base_info->raid_bdev;
+
+    /* The absence of a rebuild does not allow to capture not SPDK RAID disks or disks from the another RAID now.
+     * Redo when the rebuild will be done.
+     */
+    if (base_info->is_new) {
+        SPDK_ERRLOG("The bdev '%s' haven't been in a SPDK RAID\n",
+                    base_info->name);
+        return -EINVAL;
+    } else if (spdk_uuid_compare(&sb->uuid, &raid->bdev.uuid)) {
+        SPDK_ERRLOG("The bdev '%s' have been in another RAID bdev\n",
+                    base_info->name);
+        return -EINVAL;
+    }
+
+    if (sb->array_position != base_info->position) {
+        SPDK_WARNLOG("The base bdev '%s' has changed position in the raid from '%n' to '%n'\n", base_info->name,
+                 sb->array_position, base_info->position);
+    }
+
+    if (sb->blocklen != raid->bdev.blocklen) {
+        SPDK_ERRLOG("The logical block length stored in metadata of base '%s' bdev differ from RAID block length\n",
+                    base_info->name);
+        return -EINVAL;
+    }
+
+    if (sb->strip_size != raid->strip_size) {
+        SPDK_WARNLOG("The strip size stored in metadata of base '%s' bdev differ from RAID strip size and"
+                     "it will be overwritten\n", base_info->name);
+    }
+
+    return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_init(struct raid_base_bdev_info *base_info) {
+    struct raid_superblock *sb = base_info->raid_sb;
+    struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+    struct timespec time_0 = {.tv_nsec = 0, .tv_sec = 0};
+
+    sb->blockcnt = base_bdev->blockcnt;
+    sb->timestamp = time_0;
+
+    return 0;
 }
 
 static int
