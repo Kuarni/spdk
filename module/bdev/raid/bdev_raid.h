@@ -63,19 +63,16 @@ struct raid_superblock {
     uint32_t        magic;
 
     /* The version of metadata. Currently, only 01 version exists */
-    enum metadata_version   version;
+    uint32_t        version;
 
     /* Logical block size of base bdev */
     uint32_t        blocklen;
-
-    /* Physical block size of base bdev */
-    uint32_t        phys_blocklen;
 
     /* Number of base bdevs */
     uint8_t         num_base_bdevs;
 
     /* Raid Level of device's raid */
-    enum raid_level level;
+    uint32_t        level;
 
     /* Position of device in raid */
     uint32_t        array_position;
