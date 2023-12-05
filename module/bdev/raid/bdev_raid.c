@@ -795,6 +795,16 @@ static struct {
 	{ }
 };
 
+bool
+raid_bdev_is_raid_level(uint32_t level) {
+    for (int i = 0; g_raid_level_names[i].name != NULL; i++) {
+        if (level == g_raid_level_names[i].value)
+            return true;
+    }
+
+    return false;
+}
+
 /* We have to use the typedef in the function declaration to appease astyle. */
 typedef enum raid_level raid_level_t;
 typedef enum raid_bdev_state raid_bdev_state_t;
