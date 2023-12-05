@@ -1168,32 +1168,6 @@ raid_bdev_load_base_bdevs_sb(struct raid_base_bdev_info *base_info, uint32_t sb_
 }
 
 static int
-raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
-{
-    struct raid_superblock *sb = base_info->raid_sb;
-    struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
-    struct raid_bdev *raid = base_info->raid_bdev;
-    struct timespec time_0 = {.tv_nsec = 0, .tv_sec = 0};
-
-    sb->magic = RAID_SUPERBLOCK_MAGIC;
-    sb->version = RAID_METADATA_VERSION_01;
-    sb->blocklen = base_bdev->blocklen;
-    sb->phys_blocklen = base_bdev->phys_blocklen;
-    sb->num_base_bdevs = raid->num_base_bdevs;
-    sb->level = raid->level;
-    sb->array_position = base_info->position;
-    sb->strip_size = raid->strip_size;
-    sb->blockcnt = base_bdev->blockcnt;
-    sb->raid_blockcnt = raid->bdev.blockcnt;
-    sb->timestamp = time_0;
-    sb->uuid = raid->bdev.uuid;
-
-    memset(sb+1, 0, RAID_SB_BLOCKS(base_bdev->blocklen))
-
-    return 0;
-}
-
-static int
 raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_base_bdev_info **freshest)
 {
     int rc = 0;
@@ -1253,6 +1227,28 @@ raid_bdev_sb_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info 
     raid->bdev.uuid = sb->uuid;
     raid->strip_size = sb->strip_size;
     raid->strip_size_kb = sb->strip_size * sb->blocklen;
+
+static int
+raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
+{
+    struct raid_superblock *sb = base_info->raid_sb;
+    struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+    struct raid_bdev *raid = base_info->raid_bdev;
+
+    sb->magic = RAID_SUPERBLOCK_MAGIC;
+    sb->version = RAID_METADATA_VERSION_01;
+    sb->blocklen = raid->bdev.blocklen;
+    sb->num_base_bdevs = raid->num_base_bdevs;
+    sb->level = raid->level;
+    sb->array_position = base_info->position;
+    sb->strip_size = raid->strip_size;
+    sb->raid_blockcnt = raid->bdev.blockcnt;
+    sb->uuid = raid->bdev.uuid;
+
+    memset(sb+1, 0, RAID_SB_BLOCKS(base_bdev->blocklen));
+
+    return 0;
+}
 }
 
 static int
