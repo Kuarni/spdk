@@ -1321,7 +1321,7 @@ raid_bdev_base_bdev_super_init(struct raid_base_bdev_info *base_info) {
 }
 
 static int
-raid_bdev_base_bdev_sb_validate(struct raid_base_bdev_info *base_info)
+raid_bdev_base_bdev_super_validate(struct raid_base_bdev_info *base_info, bool recreate)
 {
     int rc = 0;
     struct raid_superblock *sb = base_info->raid_sb;
@@ -1330,22 +1330,17 @@ raid_bdev_base_bdev_sb_validate(struct raid_base_bdev_info *base_info)
     if (raid->num_base_bdevs <= 0 || !sb)
         return 0;
 
-    if (raid->is_new && raid_bdev_sb_init_validation(raid, base_info))
+    if (!recreate && raid->is_new && raid_bdev_super_init_validation(raid, base_info))
         return -EINVAL;
 
-    if (sb->version != RAID_METADATA_VERSION_01) {
-        SPDK_ERRLOG("Unsupported version of raid metadata has been found in base bdev '%s' superblock\n", base_info->name);
-        return -EINVAL;
-    }
+    if (!raid->is_new || recreate) {
+        if (!recreate && raid_bdev_base_bdev_capture_super_validate(base_info))
+            return -EINVAL;
+        
+        raid_bdev_base_bdev_super_sync(base_info);
 
-    if (!raid->is_new) {
-        sb->blocklen = raid->bdev.blocklen;
-        sb->blockcnt = spdk_bdev_desc_get_bdev(base_info->desc)->blockcnt;
-        sb->raid_blockcnt = raid->bdev.blockcnt;
-
-        if (sb->array_position != base_info->position)
-            SPDK_WARNLOG("The base bdev '%s' has changed position in the raid from '%n' to '%n'\n", base_info->name,
-                          sb->array_position, base_info->position);
+        if (recreate)
+            raid_bdev_base_bdev_super_init(base_info);
     }
 
     return rc;
