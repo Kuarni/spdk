@@ -1161,8 +1161,6 @@ raid_bdev_load_base_bdevs_sb(struct raid_base_bdev_info *base_info, uint32_t sb_
         return -ENOMEM;
     }
 
-    ctx = spdk_io_channel_get_ctx(ch);
-
     spdk_bdev_read_blocks(base_info->desc, ch, base_info->raid_sb, 0,
                           sb_size, (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_read_sb_compete,
                           base_info);
@@ -1219,17 +1217,9 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
         base_info->is_new = true;
 
     if (base_info->is_new) {
-        rc = raid_bdev_base_bdev_super_sync(base_info);
-        if (rc) {
-            SPDK_ERRLOG("Failed in super_sync for base bdev '%s'\n", base_info->name);
-            goto bad;
-        }
-
         *freshest = *freshest ? : base_info;
         return 0;
     }
-
-    base_info->raid_bdev->is_new = false;
 
     if (!*freshest) {
         *freshest = base_info;
