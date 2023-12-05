@@ -221,7 +221,7 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 	free(base_info->name);
 	base_info->name = NULL;
 
-    free(base_info->raid_sb);
+    spdk_dma_free(base_info->raid_sb);
     base_info->raid_sb = NULL;
 
 	if (base_info->desc == NULL) {
@@ -1179,6 +1179,9 @@ raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
     sb->raid_blockcnt = raid->bdev.blockcnt;
     sb->timestamp = time_0;
     sb->uuid = raid->bdev.uuid;
+
+    memset(sb+1, 0, RAID_SB_BLOCKS(base_bdev->blocklen))
+
     return 0;
 }
 
@@ -1188,7 +1191,7 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
     int rc = 0;
     struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
 
-    base_info->raid_sb = calloc(1, sb_blocks);
+    base_info->raid_sb = spdk_dma_malloc(RAID_SB_BLOCKS(base_bdev->blocklen) * base_bdev->blocklen, 0, NULL);
     if (!base_info->raid_sb) {
         SPDK_ERRLOG("Failed to allocate memory for raid_sb\n");
         return -ENOMEM;
