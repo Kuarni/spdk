@@ -1212,12 +1212,30 @@ bad:
 }
 
 static int
-raid_bdev_sb_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info *base_info)
+raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info *base_info)
 {
     int rc = 0;
     struct raid_superblock *sb = base_info->raid_sb;
 
     assert(raid->num_base_bdevs == raid->num_base_bdevs_discovered);
+
+    if (sb->version != RAID_METADATA_VERSION_01) {
+        SPDK_ERRLOG("Unsupported version of raid metadata has been found in base '%s' bdev's superblock\n",
+                    base_info->name);
+        return -EINVAL;
+    }
+
+    if (sb->num_base_bdevs != raid->num_base_bdevs) {
+        SPDK_ERRLOG("The '%s' bdev's number of devices isn't equal to RAID's\n",
+                    base_info->name);
+        return -EINVAL;
+    }
+
+    if (!raid_bdev_is_raid_level(sb->level)) {
+        SPDK_ERRLOG("Invalid RAID level in base '%s' bdev's metadata. Retrieving of array isn't possible\n",
+                    base_info->name);
+        return -EINVAL;
+    }
 
     raid->num_base_bdevs = sb->num_base_bdevs;
     raid->num_base_bdevs_discovered = sb->num_base_bdevs;
@@ -1227,6 +1245,9 @@ raid_bdev_sb_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info 
     raid->bdev.uuid = sb->uuid;
     raid->strip_size = sb->strip_size;
     raid->strip_size_kb = sb->strip_size * sb->blocklen;
+
+    return 0;
+}
 
 static int
 raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
