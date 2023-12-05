@@ -53,6 +53,7 @@ enum metadata_version {
     RAID_METADATA_VERSION_01 = 01
 };
 
+#pragma pack(push, 1)
 /*
  * Superblock for operation with metadata of the base bdev which part of some raid.
  * It stores some metadata of the base bdev and the raid
@@ -94,6 +95,7 @@ struct raid_superblock {
     /* UUID of raid bdev */
     struct spdk_uuid uuid;
 };
+#pragma pop
 
 /*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
