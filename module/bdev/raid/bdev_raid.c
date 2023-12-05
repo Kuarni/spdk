@@ -1186,8 +1186,7 @@ static int
 raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_base_bdev_info **freshest)
 {
     int rc = 0;
-    uint32_t sb_blocks = spdk_divide_round_up(sizeof(struct raid_superblock),
-                                              spdk_bdev_desc_get_bdev(base_info->desc)->blocklen);
+    struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
 
     base_info->raid_sb = calloc(1, sb_blocks);
     if (!base_info->raid_sb) {
@@ -1195,7 +1194,7 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
         return -ENOMEM;
     }
 
-    rc = raid_bdev_load_base_bdevs_sb(base_info, sb_blocks);
+    rc = raid_bdev_load_base_bdevs_sb(base_info, RAID_SB_BLOCKS(base_bdev->blocklen));
     if (rc) {
         SPDK_ERRLOG("Failed while read superblock from base bdev '%s'\n", base_info->name);
         goto bad;

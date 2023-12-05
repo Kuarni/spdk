@@ -13,6 +13,8 @@
 
 #define RAID_SUPERBLOCK_MAGIC 0x534B5244 /* "SKRD" */
 
+#define RAID_SB_BLOCKS(bdev_blocklen) spdk_divide_round_up(sizeof(struct raid_superblock), bdev_blocklen)
+
 enum raid_level {
 	INVALID_RAID_LEVEL	= -1,
 	RAID0			= 0,
