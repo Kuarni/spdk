@@ -1346,6 +1346,43 @@ raid_bdev_base_bdev_super_validate(struct raid_base_bdev_info *base_info, bool r
     return rc;
 }
 
+static int
+raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
+{
+    int rc = 0;
+    struct raid_base_bdev_info *base_info;
+    struct raid_base_bdev_info *freshest = NULL;
+
+    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+        rc = raid_bdev_base_bdev_super_load(base_info, &freshest);
+        if (rc) {
+            SPDK_DEBUGLOG("super_load for base bdev failed'%s'\n", base_info->name);
+            return rc;
+        }
+    }
+
+    if (!freshest) {
+        SPDK_DEBUGLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
+        return 0;
+    }
+
+    rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
+    if (rc) {
+        SPDK_DEBUGLOG("super_validate for freshest '%s' bdev have failed\n", base_info->name);
+        return rc;
+    }
+
+    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+        raid_bdev_base_bdev_super_validate(base_info, sb_recreate);
+        if (rc) {
+            SPDK_DEBUGLOG("super_validate for '%s' bdev have failed\n", base_info.name);
+            return rc;
+        }
+    }
+
+    return rc;
+}
+
 /*
  * brief:
  * If raid bdev config is complete, then only register the raid bdev to
