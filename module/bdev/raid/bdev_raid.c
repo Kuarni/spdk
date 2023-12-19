@@ -1130,6 +1130,42 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 }
 
 static int
+raid_bdev_base_bdev_write_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+    struct raid_base_bdev_info *base_info = cb_arg;
+
+    if (success) {
+        SPDK_NOTICELOG("Write superblock to base bdev : '%s'\n", base_info->name);
+    } else {
+        SPDK_ERRLOG("Base bdev '%s' superblock io write has failed\n", base_info->name);
+    }
+
+    spdk_bdev_free_io(bdev_io);
+}
+
+static int
+raid_bdev_base_bdev_write_sb(struct raid_base_bdev_info *base_info)
+{
+    int rc = 0;
+    struct spdk_io_channel *ch;
+    struct spdk_bdev_io *bdev_io;
+
+    ch = spdk_bdev_get_io_channel(base_info->desc);
+
+    if (!ch) {
+        SPDK_ERRLOG("Unable to create io channel for bdev '%s'\n", base_info->name);
+        return -ENOMEM;
+    }
+
+    rc = spdk_bdev_write_blocks(base_info->desc, ch, base_info->raid_sb, 0,
+                           RAID_SB_BLOCKS(spdk_bdev_desc_get_bdev(base_info)->blocklen),
+                           (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_write_sb_compete,
+                          base_info);
+
+    spdk_put_io_channel(ch);
+    return rc;
+}
+
+static int
 raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     struct raid_base_bdev_info *base_info = cb_arg;
 
