@@ -1134,9 +1134,9 @@ raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, 
     struct raid_base_bdev_info *base_info = cb_arg;
 
     if (success) {
-        SPDK_NOTICELOG("Read superblock from base bdev : %s\n", base_info->name);
+        SPDK_NOTICELOG("Read superblock from base bdev : '%s'\n", base_info->name);
     } else {
-        SPDK_ERRLOG("base bdev '%s' superblock io read error\n", base_info->name);
+        SPDK_ERRLOG("base bdev '%s' superblock io read has failed\n", base_info->name);
     }
 
     spdk_bdev_free_io(bdev_io);
@@ -1147,6 +1147,7 @@ raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, 
 static int
 raid_bdev_load_base_bdevs_sb(struct raid_base_bdev_info *base_info, uint32_t sb_size)
 {
+    int rc = 0;
     struct spdk_io_channel *ch;
     struct spdk_bdev_channel *ctx;
     struct spdk_bdev_io *bdev_io;
@@ -1161,10 +1162,12 @@ raid_bdev_load_base_bdevs_sb(struct raid_base_bdev_info *base_info, uint32_t sb_
         return -ENOMEM;
     }
 
-    spdk_bdev_read_blocks(base_info->desc, ch, base_info->raid_sb, 0,
+    rc = spdk_bdev_read_blocks(base_info->desc, ch, base_info->raid_sb, 0,
                           sb_size, (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_read_sb_compete,
                           base_info);
-    return 0;
+
+    spdk_put_io_channel(ch);
+    return rc;
 }
 
 static int
