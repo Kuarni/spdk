@@ -1391,7 +1391,7 @@ raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
     RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
         rc = raid_bdev_base_bdev_super_load(base_info, &freshest);
         if (rc) {
-            SPDK_DEBUGLOG("super_load for base bdev failed'%s'\n", base_info->name);
+            SPDK_DEBUGLOG("super_load for base bdev has failed'%s'\n", base_info->name);
             return rc;
         }
     }
@@ -1403,19 +1403,26 @@ raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
 
     rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
     if (rc) {
-        SPDK_DEBUGLOG("super_validate for freshest '%s' bdev have failed\n", base_info->name);
+        SPDK_DEBUGLOG("super_validate for freshest '%s' bdev has failed\n", base_info->name);
         return rc;
     }
 
     RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
         raid_bdev_base_bdev_super_validate(base_info, sb_recreate);
         if (rc) {
-            SPDK_DEBUGLOG("super_validate for '%s' bdev have failed\n", base_info.name);
+            SPDK_DEBUGLOG("super_validate for '%s' bdev has failed\n", base_info.name);
             return rc;
         }
     }
 
-    return rc;
+    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+        rc = raid_bdev_base_bdev_write_sb(base_info);
+        if (rc) {
+            SPDK_DEBUGLOG("Write superblock to '%s' bdev has failed");
+        }
+    }
+
+    return 0;
 }
 
 /*
