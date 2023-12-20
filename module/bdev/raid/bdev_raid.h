@@ -200,7 +200,7 @@ struct raid_bdev {
 	/* state of raid bdev */
 	enum raid_bdev_state		state;
 
-    /* indicate if raid is new for raid_bdev_base_bdev_sb_validate */
+    /* indicate if raid is new for  */
     bool                is_new;
 
 	/* number of base bdevs comprising raid bdev  */
