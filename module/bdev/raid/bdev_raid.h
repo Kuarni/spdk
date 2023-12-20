@@ -72,7 +72,7 @@ struct raid_superblock {
     uint8_t         num_base_bdevs;
 
     /* Raid Level of device's raid */
-    uint32_t        level;
+    int32_t        level;
 
     /* Position of device in raid */
     uint32_t        array_position;
@@ -92,7 +92,7 @@ struct raid_superblock {
     /* UUID of raid bdev */
     struct spdk_uuid uuid;
 };
-#pragma pop
+#pragma pack(pop)
 
 /*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
