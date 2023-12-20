@@ -949,6 +949,58 @@ raid_bdev_init(void)
 	return 0;
 }
 
+static int
+raid_bdev_module_init(struct raid_bdev *raid_bdev) {
+    struct raid_bdev_module *module;
+    uint8_t min_operational;
+
+    module = raid_bdev_module_find(raid_bdev->level);
+    if (module == NULL) {
+        SPDK_ERRLOG("Unsupported raid_bdev level '%d'\n", raid_bdev->level);
+        return -EINVAL;
+    }
+
+    assert(module->base_bdevs_min != 0);
+    if (raid_bdev->num_base_bdevs < module->base_bdevs_min) {
+        SPDK_ERRLOG("At least %u base devices required for %s\n",
+                    module->base_bdevs_min,
+                    raid_bdev_level_to_str(raid_bdev->level));
+        return -EINVAL;
+    }
+
+    switch (module->base_bdevs_constraint.type) {
+        case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
+            min_operational = raid_bdev->num_base_bdevs - module->base_bdevs_constraint.value;
+            break;
+        case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
+            min_operational = module->base_bdevs_constraint.value;
+            break;
+        case CONSTRAINT_UNSET:
+            if (module->base_bdevs_constraint.value != 0) {
+                SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid_bdev bdev '%s'.\n",
+                            (uint8_t)module->base_bdevs_constraint.value, raid_bdev->bdev.name);
+                return -EINVAL;
+            }
+            min_operational = raid_bdev->num_base_bdevs;
+            break;
+        default:
+            SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid_bdev level '%s'.\n",
+                        (uint8_t)module->base_bdevs_constraint.type,
+                        raid_bdev_level_to_str(module->level));
+            return -EINVAL;
+    };
+
+    if (min_operational == 0 || min_operational > raid_bdev->num_base_bdevs) {
+        SPDK_ERRLOG("Wrong constraint value for raid_bdev level '%s'.\n",
+                    raid_bdev_level_to_str(module->level));
+        return -EINVAL;
+    }
+
+    raid_bdev->min_base_bdevs_operational = min_operational;
+
+    return 0;
+}
+
 /*
  * brief:
  * raid_bdev_create allocates raid bdev based on passed configuration
@@ -971,9 +1023,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 {
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
-	struct raid_bdev_module *module;
 	struct raid_base_bdev_info *base_info;
-	uint8_t min_operational;
 
 	if (raid_bdev_find_by_name(name) != NULL) {
 		SPDK_ERRLOG("Duplicate raid bdev name found: %s\n", name);
@@ -990,48 +1040,6 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return -EINVAL;
 	}
 
-	module = raid_bdev_module_find(level);
-	if (module == NULL) {
-		SPDK_ERRLOG("Unsupported raid level '%d'\n", level);
-		return -EINVAL;
-	}
-
-	assert(module->base_bdevs_min != 0);
-	if (num_base_bdevs < module->base_bdevs_min) {
-		SPDK_ERRLOG("At least %u base devices required for %s\n",
-			    module->base_bdevs_min,
-			    raid_bdev_level_to_str(level));
-		return -EINVAL;
-	}
-
-	switch (module->base_bdevs_constraint.type) {
-	case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
-		min_operational = num_base_bdevs - module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
-		min_operational = module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_UNSET:
-		if (module->base_bdevs_constraint.value != 0) {
-			SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid bdev '%s'.\n",
-				    (uint8_t)module->base_bdevs_constraint.value, name);
-			return -EINVAL;
-		}
-		min_operational = num_base_bdevs;
-		break;
-	default:
-		SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid level '%s'.\n",
-			    (uint8_t)module->base_bdevs_constraint.type,
-			    raid_bdev_level_to_str(module->level));
-		return -EINVAL;
-	};
-
-	if (min_operational == 0 || min_operational > num_base_bdevs) {
-		SPDK_ERRLOG("Wrong constraint value for raid level '%s'.\n",
-			    raid_bdev_level_to_str(module->level));
-		return -EINVAL;
-	}
-
 	raid_bdev = calloc(1, sizeof(*raid_bdev));
 	if (!raid_bdev) {
 		SPDK_ERRLOG("Unable to allocate memory for raid bdev\n");
@@ -1039,7 +1047,6 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	}
 
 	spdk_spin_init(&raid_bdev->base_bdev_lock);
-	raid_bdev->module = module;
 	raid_bdev->num_base_bdevs = num_base_bdevs;
 	raid_bdev->base_bdev_info = calloc(raid_bdev->num_base_bdevs,
 					   sizeof(struct raid_base_bdev_info));
@@ -1060,9 +1067,13 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->strip_size_kb = strip_size;
 	raid_bdev->state = RAID_BDEV_STATE_CONFIGURING;
 	raid_bdev->level = level;
-	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock_enabled;
     raid_bdev->is_new = true;
+
+    if (raid_bdev_module_init(raid_bdev)) {
+        raid_bdev_free(raid_bdev);
+        return -EINVAL;
+    }
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
