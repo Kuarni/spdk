@@ -115,9 +115,6 @@ struct raid_base_bdev_info {
     /* indicate if the metadata was on disk or not */
     bool is_new;
 
-    /* true if sb has loaded */
-    bool sb_loaded;
-
     /* base bdev's superblock */
     struct raid_superblock  *raid_sb;
 

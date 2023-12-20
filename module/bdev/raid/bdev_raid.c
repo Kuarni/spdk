@@ -1187,8 +1187,6 @@ raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, 
     }
 
     spdk_bdev_free_io(bdev_io);
-
-    base_info->sb_loaded = true;
 }
 
 static int
@@ -1196,9 +1194,6 @@ raid_bdev_base_bdev_read_sb(struct raid_base_bdev_info *base_info, uint32_t sb_s
 {
     int rc = 0;
     struct spdk_io_channel *ch;
-
-    if (base_info->sb_loaded)
-        return 0;
 
     ch = spdk_bdev_get_io_channel(base_info->desc);
 
@@ -1230,7 +1225,6 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
     rc = raid_bdev_base_bdev_read_sb(base_info, RAID_SB_BLOCKS(base_bdev->blocklen));
     if (rc) {
         SPDK_ERRLOG("Failed while read superblock from base bdev '%s'\n", base_info->name);
-        base_info->sb_loaded = false;
         return rc;
     }
 
