@@ -2144,6 +2144,20 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                                       'option specified', action='store_true')
     p.set_defaults(func=bdev_raid_create)
 
+    def bdev_raid_retrieve(args):
+        base_bdevs = []
+        for u in args.base_bdevs.strip().split(" "):
+            base_bdevs.append(u)
+
+        rpc.bdev.bdev_raid_create(args.client,
+                                  name=args.name,
+                                  base_bdevs=base_bdevs)
+    p = subparsers.add_parser('bdev_raid_retrieve', help='Try to restore raid from metadata in base bdevs')
+    p.add_argument('-n', '--name', help='new name for retrieved raid', required=True)
+    p.add_argument('-b', '--base-bdevs', help='base bdevs name whiche have the superblock with raid metadata, '
+                                              'whitespace separated list in quotes', required=True)
+    p.set_defaults(func=bdev_raid_retrieve)
+
     def bdev_raid_delete(args):
         rpc.bdev.bdev_raid_delete(args.client,
                                   name=args.name)

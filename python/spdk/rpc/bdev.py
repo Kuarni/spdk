@@ -434,6 +434,22 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
     return client.call('bdev_raid_create', params)
 
 
+def bdev_raid_retrieve(client, name, base_bdevs):
+    """Wrapper of bdev_raid_create. Tried to retrieve raid array from base bdevs.
+
+    Args:
+        name: user defined raid bdev name for retrieved raid
+        base_bdevs: Space separated names of retrieving array base bdevs in double quotes,
+                    like "Nvme0n1 Nvme1n1 Nvme2n1"
+
+    Returns:
+        None
+    """
+    params = {'name': name, 'raid_level': "raid1", 'base_bdevs': base_bdevs, 'superblock': True, 'retrieve': True}
+
+    return client.call('bdev_raid_retrieve', params)
+
+
 def bdev_raid_delete(client, name):
     """Delete raid bdev
 
