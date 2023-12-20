@@ -1168,7 +1168,7 @@ raid_bdev_base_bdev_write_sb(struct raid_base_bdev_info *base_info)
     }
 
     rc = spdk_bdev_write_blocks(base_info->desc, ch, base_info->raid_sb, 0,
-                           RAID_SB_BLOCKS(spdk_bdev_desc_get_bdev(base_info)->blocklen),
+                           RAID_SB_BLOCKS(spdk_bdev_desc_get_bdev(base_info->desc)->blocklen),
                            (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_write_sb_compete,
                           base_info);
 
@@ -1335,7 +1335,7 @@ raid_bdev_base_bdev_capture_super_validate(struct raid_base_bdev_info *base_info
 
     if (sb->array_position != base_info->position) {
         SPDK_WARNLOG("The base bdev '%s' has changed position in the raid from '%n' to '%n'\n", base_info->name,
-                 sb->array_position, base_info->position);
+                     &sb->array_position, &base_info->position);
     }
 
     if (sb->blocklen != raid->bdev.blocklen) {
