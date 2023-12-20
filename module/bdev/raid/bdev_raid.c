@@ -1141,7 +1141,7 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 	return 0;
 }
 
-static int
+static void
 raid_bdev_base_bdev_write_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     struct raid_base_bdev_info *base_info = cb_arg;
 
@@ -1176,7 +1176,7 @@ raid_bdev_base_bdev_write_sb(struct raid_base_bdev_info *base_info)
     return rc;
 }
 
-static int
+static void
 raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     struct raid_base_bdev_info *base_info = cb_arg;
 
