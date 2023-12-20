@@ -1062,6 +1062,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->level = level;
 	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock_enabled;
+    raid_bdev->is_new = true;
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
@@ -1401,6 +1402,8 @@ raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
         return 0;
     }
 
+    raid_bdev->is_new = true;
+
     rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
     if (rc) {
         SPDK_DEBUGLOG("super_validate for freshest '%s' bdev has failed\n", base_info->name);
@@ -1484,6 +1487,17 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 		SPDK_ERRLOG("raid metadata configuration failed\n");
 		return rc;
 	}
+
+    if (raid_bdev->superblock_enabled) {
+        /* majoranta for superblock metadata configuration */
+        raid_bdev_gen->blockcnt = blocklen * raid_bdev->num_base_bdevs;
+
+        rc = raid_bdev_analyse_superblocks(raid_bdev, raid_bdev->is_new);
+        if (rc != 0) {
+            SPDK_ERRLOG("raid module superblock analyse failed\n");
+            return rc;
+        }
+    }
 
 	rc = raid_bdev->module->start(raid_bdev);
 	if (rc != 0) {
