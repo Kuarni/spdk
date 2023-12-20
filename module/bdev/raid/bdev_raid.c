@@ -1887,7 +1887,8 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 
 	if (raid_bdev->superblock_enabled) {
 		assert((RAID_BDEV_MIN_DATA_OFFSET_SIZE % bdev->blocklen) == 0);
-		base_info->data_offset = RAID_BDEV_MIN_DATA_OFFSET_SIZE / bdev->blocklen;
+		base_info->data_offset = spdk_max(RAID_BDEV_MIN_DATA_OFFSET_SIZE/bdev->blocklen,
+                                          RAID_SB_BLOCKS(bdev->blocklen));
 
 		if (bdev->optimal_io_boundary) {
 			base_info->data_offset = spdk_divide_round_up(base_info->data_offset,
