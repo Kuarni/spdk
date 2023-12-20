@@ -795,10 +795,10 @@ static struct {
 	{ }
 };
 
-bool
-raid_bdev_is_raid_level(uint32_t level) {
+static bool
+raid_bdev_is_raid_level(int32_t level) {
     for (int i = 0; g_raid_level_names[i].name != NULL; i++) {
-        if (level == g_raid_level_names[i].value)
+        if (level == (int32_t) g_raid_level_names[i].value)
             return true;
     }
 
