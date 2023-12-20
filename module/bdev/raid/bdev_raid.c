@@ -1500,13 +1500,19 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	}
 
     if (raid_bdev->superblock_enabled) {
+        bool recreate = raid_bdev->is_new;
+
         /* majoranta for superblock metadata configuration */
         raid_bdev_gen->blockcnt = blocklen * raid_bdev->num_base_bdevs;
 
-        rc = raid_bdev_analyse_superblocks(raid_bdev, raid_bdev->is_new);
+        rc = raid_bdev_analyse_superblocks(raid_bdev, recreate);
         if (rc != 0) {
             SPDK_ERRLOG("raid module superblock analyse failed\n");
             return rc;
+        }
+
+        if (!recreate && raid_bdev_module_init(raid_bdev)) {
+            return -EINVAL;
         }
     }
 
