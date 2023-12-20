@@ -988,7 +988,7 @@ raid_bdev_module_init(struct raid_bdev *raid_bdev) {
                         (uint8_t)module->base_bdevs_constraint.type,
                         raid_bdev_level_to_str(module->level));
             return -EINVAL;
-    };
+    }
 
     if (min_operational == 0 || min_operational > raid_bdev->num_base_bdevs) {
         SPDK_ERRLOG("Wrong constraint value for raid_bdev level '%s'.\n",
@@ -1159,7 +1159,6 @@ raid_bdev_base_bdev_write_sb(struct raid_base_bdev_info *base_info)
 {
     int rc = 0;
     struct spdk_io_channel *ch;
-    struct spdk_bdev_io *bdev_io;
 
     ch = spdk_bdev_get_io_channel(base_info->desc);
 
@@ -1197,7 +1196,6 @@ raid_bdev_base_bdev_read_sb(struct raid_base_bdev_info *base_info, uint32_t sb_s
 {
     int rc = 0;
     struct spdk_io_channel *ch;
-    struct spdk_bdev_io *bdev_io;
 
     if (base_info->sb_loaded)
         return 0;
@@ -1261,7 +1259,6 @@ raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct rai
 static int
 raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info *base_info)
 {
-    int rc = 0;
     struct raid_superblock *sb = base_info->raid_sb;
 
     assert(raid->num_base_bdevs == raid->num_base_bdevs_discovered);
