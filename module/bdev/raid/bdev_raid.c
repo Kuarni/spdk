@@ -1147,7 +1147,7 @@ raid_bdev_base_bdev_write_sb_compete(struct spdk_bdev_io *bdev_io, bool success,
     struct raid_base_bdev_info *base_info = cb_arg;
 
     if (success) {
-        SPDK_NOTICELOG("Write superblock to base bdev : '%s'\n", base_info->name);
+        SPDK_DEBUGLOG(bdev_raid, "Write superblock to base bdev : '%s'\n", base_info->name);
     } else {
         SPDK_ERRLOG("Base bdev '%s' superblock io write has failed\n", base_info->name);
     }
@@ -1182,7 +1182,7 @@ raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, 
     struct raid_base_bdev_info *base_info = cb_arg;
 
     if (success) {
-        SPDK_NOTICELOG("Read superblock from base bdev : '%s'\n", base_info->name);
+        SPDK_DEBUGLOG(bdev_raid, "Read superblock from base bdev : '%s'\n", base_info->name);
     } else {
         SPDK_ERRLOG("base bdev '%s' superblock io read has failed\n", base_info->name);
     }
@@ -1257,6 +1257,11 @@ raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_in
     struct raid_superblock *sb = base_info->raid_sb;
 
     assert(raid->num_base_bdevs == raid->num_base_bdevs_discovered);
+
+    if (base_info->is_new) {
+        SPDK_ERRLOG("There isn't any metadata on base bdevs for raid '%s'\n", raid->bdev.name);
+        return -EINVAL;
+    }
 
     if (sb->version != RAID_METADATA_VERSION_01) {
         SPDK_ERRLOG("Unsupported version of raid metadata has been found in base '%s' bdev's superblock\n",
@@ -1387,54 +1392,6 @@ raid_bdev_base_bdev_super_validate(struct raid_base_bdev_info *base_info, bool r
     return rc;
 }
 
-static int
-raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
-{
-    int rc = 0;
-    struct raid_base_bdev_info *base_info;
-    struct raid_base_bdev_info *freshest = NULL;
-
-    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-        rc = raid_bdev_base_bdev_super_load(base_info, &freshest);
-        if (rc) {
-            SPDK_DEBUGLOG(bdev_raid, "super_load for base bdev has failed'%s'\n", base_info->name);
-            return rc;
-        }
-    }
-
-    SPDK_DEBUGLOG(bdev_raid, "The freshest bdev is '%s'\n", freshest->name);
-
-    if (!freshest) {
-        SPDK_ERRLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
-        return -EINVAL;
-    }
-
-    raid_bdev->is_new = true;
-
-    rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
-    if (rc) {
-        SPDK_DEBUGLOG(bdev_raid, "super_validate for freshest '%s' bdev has failed\n", base_info->name);
-        return rc;
-    }
-
-    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-        raid_bdev_base_bdev_super_validate(base_info, sb_recreate);
-        if (rc) {
-            SPDK_DEBUGLOG(bdev_raid, "super_validate for '%s' bdev has failed\n", base_info->name);
-            return rc;
-        }
-    }
-
-    RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-        rc = raid_bdev_base_bdev_write_sb(base_info);
-        if (rc) {
-            SPDK_DEBUGLOG(bdev_raid, "Write superblock to '%s' bdev has failed\n", base_info->name);
-        }
-    }
-
-    return 0;
-}
-
 /*
  * brief:
  * If raid bdev config is complete, then only register the raid bdev to
@@ -1453,6 +1410,8 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_base_bdev_info *base_info;
 	struct spdk_bdev *base_bdev;
+    bool sb_recreate = raid_bdev->is_new;
+    struct raid_base_bdev_info *freshest = NULL;
 	int rc = 0;
 
 	assert(raid_bdev->state == RAID_BDEV_STATE_CONFIGURING);
@@ -1496,18 +1455,30 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	}
 
     if (raid_bdev->superblock_enabled) {
-        bool recreate = raid_bdev->is_new;
+        RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+            rc = raid_bdev_base_bdev_super_load(base_info, &freshest);
+            if (rc) {
+                SPDK_DEBUGLOG(bdev_raid, "super_load for base bdev has failed'%s'\n", base_info->name);
+                return rc;
+            }
+        }
 
-        /* majoranta for superblock metadata configuration */
-        raid_bdev_gen->blockcnt = blocklen * raid_bdev->num_base_bdevs;
+        SPDK_DEBUGLOG(bdev_raid, "The freshest bdev is '%s'\n", freshest->name);
 
-        rc = raid_bdev_analyse_superblocks(raid_bdev, recreate);
-        if (rc != 0) {
-            SPDK_ERRLOG("raid module superblock analyse failed\n");
+        if (!freshest) {
+            SPDK_ERRLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
+            return -EINVAL;
+        }
+
+        raid_bdev->is_new = true;
+
+        rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
+        if (rc) {
+            SPDK_DEBUGLOG(bdev_raid, "super_validate for freshest '%s' bdev has failed\n", base_info->name);
             return rc;
         }
 
-        if (!recreate && raid_bdev_module_init(raid_bdev)) {
+        if (!sb_recreate && raid_bdev_module_init(raid_bdev)) {
             return -EINVAL;
         }
     }
@@ -1537,6 +1508,23 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	SPDK_DEBUGLOG(bdev_raid, "raid bdev generic %p\n", raid_bdev_gen);
 	SPDK_DEBUGLOG(bdev_raid, "raid bdev is created with name %s, raid_bdev %p\n",
 		      raid_bdev_gen->name, raid_bdev);
+
+    if (raid_bdev->superblock_enabled) {
+        RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+            raid_bdev_base_bdev_super_validate(base_info, sb_recreate);
+            if (rc) {
+                SPDK_DEBUGLOG(bdev_raid, "super_validate for '%s' bdev has failed\n", base_info->name);
+                return rc;
+            }
+        }
+
+        RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+            rc = raid_bdev_base_bdev_write_sb(base_info);
+            if (rc) {
+                SPDK_DEBUGLOG(bdev_raid, "Write superblock to '%s' bdev has failed\n", base_info->name);
+            }
+        }
+    }
 
 	return 0;
 }
