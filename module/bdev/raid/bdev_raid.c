@@ -1285,6 +1285,8 @@ raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_in
     raid->strip_size = sb->strip_size;
     raid->strip_size_kb = sb->strip_size * sb->blocklen;
 
+    raid->is_new = false;
+
     return 0;
 }
 
@@ -1399,6 +1401,8 @@ raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
             return rc;
         }
     }
+
+    SPDK_DEBUGLOG(bdev_raid, "The freshest bdev is '%s'\n", freshest->name);
 
     if (!freshest) {
         SPDK_ERRLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
