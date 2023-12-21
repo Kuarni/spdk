@@ -221,6 +221,9 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 	free(base_info->name);
 	base_info->name = NULL;
 
+	spdk_dma_free(base_info->raid_sb);
+	base_info->raid_sb = NULL;
+
 	if (base_info->desc == NULL) {
 		return;
 	}
@@ -792,6 +795,16 @@ static struct {
 	{ }
 };
 
+static bool
+raid_bdev_is_raid_level(int32_t level) {
+	for (int i = 0; g_raid_level_names[i].name != NULL; i++) {
+		if (level == (int32_t) g_raid_level_names[i].value)
+			return true;
+	}
+
+	return false;
+}
+
 /* We have to use the typedef in the function declaration to appease astyle. */
 typedef enum raid_level raid_level_t;
 typedef enum raid_bdev_state raid_bdev_state_t;
@@ -936,6 +949,59 @@ raid_bdev_init(void)
 	return 0;
 }
 
+static int
+raid_bdev_module_init(struct raid_bdev *raid_bdev) {
+	struct raid_bdev_module *module;
+	uint8_t min_operational;
+
+	module = raid_bdev_module_find(raid_bdev->level);
+	if (module == NULL) {
+		SPDK_ERRLOG("Unsupported raid_bdev level '%d'\n", raid_bdev->level);
+		return -EINVAL;
+	}
+
+	assert(module->base_bdevs_min != 0);
+	if (raid_bdev->num_base_bdevs < module->base_bdevs_min) {
+		SPDK_ERRLOG("At least %u base devices required for %s\n",
+					module->base_bdevs_min,
+					raid_bdev_level_to_str(raid_bdev->level));
+		return -EINVAL;
+	}
+
+	switch (module->base_bdevs_constraint.type) {
+		case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
+			min_operational = raid_bdev->num_base_bdevs - module->base_bdevs_constraint.value;
+			break;
+		case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
+			min_operational = module->base_bdevs_constraint.value;
+			break;
+		case CONSTRAINT_UNSET:
+			if (module->base_bdevs_constraint.value != 0) {
+				SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid_bdev bdev '%s'.\n",
+							(uint8_t)module->base_bdevs_constraint.value, raid_bdev->bdev.name);
+				return -EINVAL;
+			}
+			min_operational = raid_bdev->num_base_bdevs;
+			break;
+		default:
+			SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid_bdev level '%s'.\n",
+						(uint8_t)module->base_bdevs_constraint.type,
+						raid_bdev_level_to_str(module->level));
+			return -EINVAL;
+	}
+
+	if (min_operational == 0 || min_operational > raid_bdev->num_base_bdevs) {
+		SPDK_ERRLOG("Wrong constraint value for raid_bdev level '%s'.\n",
+					raid_bdev_level_to_str(module->level));
+		return -EINVAL;
+	}
+
+	raid_bdev->min_base_bdevs_operational = min_operational;
+	raid_bdev->module = module;
+
+	return 0;
+}
+
 /*
  * brief:
  * raid_bdev_create allocates raid bdev based on passed configuration
@@ -958,9 +1024,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 {
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
-	struct raid_bdev_module *module;
 	struct raid_base_bdev_info *base_info;
-	uint8_t min_operational;
 
 	if (raid_bdev_find_by_name(name) != NULL) {
 		SPDK_ERRLOG("Duplicate raid bdev name found: %s\n", name);
@@ -977,48 +1041,6 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return -EINVAL;
 	}
 
-	module = raid_bdev_module_find(level);
-	if (module == NULL) {
-		SPDK_ERRLOG("Unsupported raid level '%d'\n", level);
-		return -EINVAL;
-	}
-
-	assert(module->base_bdevs_min != 0);
-	if (num_base_bdevs < module->base_bdevs_min) {
-		SPDK_ERRLOG("At least %u base devices required for %s\n",
-			    module->base_bdevs_min,
-			    raid_bdev_level_to_str(level));
-		return -EINVAL;
-	}
-
-	switch (module->base_bdevs_constraint.type) {
-	case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
-		min_operational = num_base_bdevs - module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
-		min_operational = module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_UNSET:
-		if (module->base_bdevs_constraint.value != 0) {
-			SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid bdev '%s'.\n",
-				    (uint8_t)module->base_bdevs_constraint.value, name);
-			return -EINVAL;
-		}
-		min_operational = num_base_bdevs;
-		break;
-	default:
-		SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid level '%s'.\n",
-			    (uint8_t)module->base_bdevs_constraint.type,
-			    raid_bdev_level_to_str(module->level));
-		return -EINVAL;
-	};
-
-	if (min_operational == 0 || min_operational > num_base_bdevs) {
-		SPDK_ERRLOG("Wrong constraint value for raid level '%s'.\n",
-			    raid_bdev_level_to_str(module->level));
-		return -EINVAL;
-	}
-
 	raid_bdev = calloc(1, sizeof(*raid_bdev));
 	if (!raid_bdev) {
 		SPDK_ERRLOG("Unable to allocate memory for raid bdev\n");
@@ -1026,7 +1048,6 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	}
 
 	spdk_spin_init(&raid_bdev->base_bdev_lock);
-	raid_bdev->module = module;
 	raid_bdev->num_base_bdevs = num_base_bdevs;
 	raid_bdev->base_bdev_info = calloc(raid_bdev->num_base_bdevs,
 					   sizeof(struct raid_base_bdev_info));
@@ -1047,8 +1068,13 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->strip_size_kb = strip_size;
 	raid_bdev->state = RAID_BDEV_STATE_CONFIGURING;
 	raid_bdev->level = level;
-	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock_enabled;
+	raid_bdev->is_new = true;
+
+	if (raid_bdev_module_init(raid_bdev)) {
+		raid_bdev_free(raid_bdev);
+		return -EINVAL;
+	}
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
@@ -1116,6 +1142,258 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 	return 0;
 }
 
+static void
+raid_bdev_base_bdev_write_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+	struct raid_base_bdev_info *base_info = cb_arg;
+
+	if (success) {
+		SPDK_DEBUGLOG(bdev_raid, "Write superblock to base bdev : '%s'\n", base_info->name);
+	} else {
+		SPDK_ERRLOG("Base bdev '%s' superblock io write has failed\n", base_info->name);
+	}
+
+	spdk_bdev_free_io(bdev_io);
+}
+
+static int
+raid_bdev_base_bdev_write_sb(struct raid_base_bdev_info *base_info)
+{
+	int rc = 0;
+	struct spdk_io_channel *ch;
+
+	ch = spdk_bdev_get_io_channel(base_info->desc);
+
+	if (!ch) {
+		SPDK_ERRLOG("Unable to create io channel for bdev '%s'\n", base_info->name);
+		return -ENOMEM;
+	}
+
+	rc = spdk_bdev_write_blocks(base_info->desc, ch, base_info->raid_sb, 0,
+						   RAID_SB_BLOCKS(spdk_bdev_desc_get_bdev(base_info->desc)->blocklen),
+						   (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_write_sb_compete,
+						  base_info);
+
+	spdk_put_io_channel(ch);
+	return rc;
+}
+
+static void
+raid_bdev_base_bdev_read_sb_compete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+	struct raid_base_bdev_info *base_info = cb_arg;
+
+	if (success) {
+		SPDK_DEBUGLOG(bdev_raid, "Read superblock from base bdev : '%s'\n", base_info->name);
+	} else {
+		SPDK_ERRLOG("base bdev '%s' superblock io read has failed\n", base_info->name);
+	}
+
+	spdk_bdev_free_io(bdev_io);
+}
+
+static int
+raid_bdev_base_bdev_read_sb(struct raid_base_bdev_info *base_info, uint32_t sb_size)
+{
+	int rc = 0;
+	struct spdk_io_channel *ch;
+
+	ch = spdk_bdev_get_io_channel(base_info->desc);
+
+	if (!ch) {
+		SPDK_ERRLOG("Unable to create io channel for bdev '%s'\n", base_info->name);
+		return -ENOMEM;
+	}
+
+	rc = spdk_bdev_read_blocks(base_info->desc, ch, base_info->raid_sb, 0,
+						  sb_size, (spdk_bdev_io_completion_cb) raid_bdev_base_bdev_read_sb_compete,
+						  base_info);
+//    wait(NULL);
+	spdk_put_io_channel(ch);
+	return rc;
+}
+
+static int
+raid_bdev_base_bdev_super_load(struct raid_base_bdev_info *base_info, struct raid_base_bdev_info **freshest)
+{
+	int rc = 0;
+	struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+
+	base_info->raid_sb = spdk_dma_malloc(RAID_SB_BLOCKS(base_bdev->blocklen) * base_bdev->blocklen, 0, NULL);
+	if (!base_info->raid_sb) {
+		SPDK_ERRLOG("Failed to allocate memory for raid_sb\n");
+		return -ENOMEM;
+	}
+
+	rc = raid_bdev_base_bdev_read_sb(base_info, RAID_SB_BLOCKS(base_bdev->blocklen));
+	if (rc) {
+		SPDK_ERRLOG("Failed while read superblock from base bdev '%s'\n", base_info->name);
+		return rc;
+	}
+
+	struct raid_superblock *sb = base_info->raid_sb;
+
+	if (sb->magic != RAID_SUPERBLOCK_MAGIC)
+		base_info->is_new = true;
+
+	if (base_info->is_new) {
+		*freshest = *freshest ? : base_info;
+		return 0;
+	}
+
+	if (!*freshest) {
+		*freshest = base_info;
+		return 0;
+	}
+
+	if ((*freshest)->raid_sb->timestamp.tv_sec <= sb->timestamp.tv_sec &&
+		(*freshest)->raid_sb->timestamp.tv_nsec < sb->timestamp.tv_nsec)
+		*freshest = base_info;
+
+	return 0;
+}
+
+static int
+raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_info *base_info)
+{
+	struct raid_superblock *sb = base_info->raid_sb;
+
+	assert(raid->num_base_bdevs == raid->num_base_bdevs_discovered);
+
+	if (base_info->is_new) {
+		SPDK_ERRLOG("There isn't any metadata on base bdevs for raid '%s'\n", raid->bdev.name);
+		return -EINVAL;
+	}
+
+	if (sb->version != RAID_METADATA_VERSION_01) {
+		SPDK_ERRLOG("Unsupported version of raid metadata has been found in base '%s' bdev's superblock\n",
+					base_info->name);
+		return -EINVAL;
+	}
+
+	if (sb->num_base_bdevs != raid->num_base_bdevs) {
+		SPDK_ERRLOG("The '%s' bdev's number of devices isn't equal to RAID's\n",
+					base_info->name);
+		return -EINVAL;
+	}
+
+	if (!raid_bdev_is_raid_level(sb->level)) {
+		SPDK_ERRLOG("Invalid RAID level in base '%s' bdev's metadata. Retrieving of array isn't possible\n",
+					base_info->name);
+		return -EINVAL;
+	}
+
+	raid->num_base_bdevs = sb->num_base_bdevs;
+	raid->num_base_bdevs_discovered = sb->num_base_bdevs;
+	raid->level = sb->level;
+	raid->bdev.blocklen = sb->blocklen;
+	raid->bdev.blockcnt = sb->raid_blockcnt;
+	spdk_uuid_copy(&raid->bdev.uuid, &sb->uuid);
+	raid->strip_size = sb->strip_size;
+	raid->strip_size_kb = sb->strip_size * sb->blocklen;
+	raid->strip_size_shift = spdk_u32log2(sb->strip_size);
+	raid->blocklen_shift = spdk_u32log2(sb->blocklen);
+
+	raid->is_new = false;
+
+	return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
+{
+	struct raid_superblock *sb = base_info->raid_sb;
+	struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+	struct raid_bdev *raid = base_info->raid_bdev;
+
+	sb->magic = RAID_SUPERBLOCK_MAGIC;
+	sb->version = RAID_METADATA_VERSION_01;
+	sb->blocklen = raid->bdev.blocklen;
+	sb->num_base_bdevs = raid->num_base_bdevs;
+	sb->level = raid->level;
+	sb->array_position = base_info->position;
+	sb->strip_size = raid->strip_size;
+	sb->raid_blockcnt = raid->bdev.blockcnt;
+	spdk_uuid_copy(&sb->uuid, &raid->bdev.uuid);
+
+	memset(sb+1, 0, RAID_SB_BLOCKS(base_bdev->blocklen));
+
+	return 0;
+}
+
+static int
+raid_bdev_base_bdev_capture_super_validate(struct raid_base_bdev_info *base_info) {
+	struct raid_superblock *sb = base_info->raid_sb;
+	struct raid_bdev *raid = base_info->raid_bdev;
+
+	/* The absence of a rebuild does not allow to capture not SPDK RAID disks or disks from the another RAID now.
+	 * Redo when the rebuild will be done.
+	 */
+	if (base_info->is_new) {
+		SPDK_ERRLOG("The bdev '%s' haven't been in a SPDK RAID\n",
+					base_info->name);
+		return -EINVAL;
+	} else if (spdk_uuid_compare(&sb->uuid, &raid->bdev.uuid)) {
+		SPDK_ERRLOG("The bdev '%s' have been in another RAID bdev\n",
+					base_info->name);
+		return -EINVAL;
+	}
+
+	if (sb->array_position != base_info->position) {
+		SPDK_WARNLOG("The base bdev '%s' has changed position in the raid from '%n' to '%n'\n", base_info->name,
+					 &sb->array_position, &base_info->position);
+	}
+
+	if (sb->blocklen != raid->bdev.blocklen) {
+		SPDK_ERRLOG("The logical block length stored in metadata of base '%s' bdev differ from RAID block length\n",
+					base_info->name);
+		return -EINVAL;
+	}
+
+	if (sb->strip_size != raid->strip_size) {
+		SPDK_WARNLOG("The strip size stored in metadata of base '%s' bdev differ from RAID strip size and"
+					 "it will be overwritten\n", base_info->name);
+	}
+
+	return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_init(struct raid_base_bdev_info *base_info) {
+	struct raid_superblock *sb = base_info->raid_sb;
+	struct spdk_bdev *base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+	struct timespec time_0 = {.tv_nsec = 0, .tv_sec = 0};
+
+	sb->blockcnt = base_bdev->blockcnt;
+	sb->timestamp = time_0;
+
+	return 0;
+}
+
+static int
+raid_bdev_base_bdev_super_validate(struct raid_base_bdev_info *base_info, bool recreate)
+{
+	int rc = 0;
+	struct raid_superblock *sb = base_info->raid_sb;
+	struct raid_bdev *raid = base_info->raid_bdev;
+
+	if (raid->num_base_bdevs <= 0 || !sb)
+		return 0;
+
+	if (!recreate && raid->is_new && raid_bdev_super_init_validation(raid, base_info))
+		return -EINVAL;
+
+	if (!raid->is_new || recreate) {
+		if (!recreate && raid_bdev_base_bdev_capture_super_validate(base_info))
+			return -EINVAL;
+
+		raid_bdev_base_bdev_super_sync(base_info);
+
+		if (recreate)
+			raid_bdev_base_bdev_super_init(base_info);
+	}
+
+	return rc;
+}
+
 /*
  * brief:
  * If raid bdev config is complete, then only register the raid bdev to
@@ -1134,6 +1412,8 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_base_bdev_info *base_info;
 	struct spdk_bdev *base_bdev;
+	bool sb_recreate = raid_bdev->is_new;
+	struct raid_base_bdev_info *freshest = NULL;
 	int rc = 0;
 
 	assert(raid_bdev->state == RAID_BDEV_STATE_CONFIGURING);
@@ -1176,6 +1456,35 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 		return rc;
 	}
 
+	if (raid_bdev->superblock_enabled) {
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+			rc = raid_bdev_base_bdev_super_load(base_info, &freshest);
+			if (rc) {
+				SPDK_DEBUGLOG(bdev_raid, "super_load for base bdev has failed'%s'\n", base_info->name);
+				return rc;
+			}
+		}
+
+		SPDK_DEBUGLOG(bdev_raid, "The freshest bdev is '%s'\n", freshest->name);
+
+		if (!freshest) {
+			SPDK_ERRLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
+			return -EINVAL;
+		}
+
+		raid_bdev->is_new = true;
+
+		rc = raid_bdev_base_bdev_super_validate(freshest, sb_recreate);
+		if (rc) {
+			SPDK_DEBUGLOG(bdev_raid, "super_validate for freshest '%s' bdev has failed\n", base_info->name);
+			return rc;
+		}
+
+		if (!sb_recreate && raid_bdev_module_init(raid_bdev)) {
+			return -EINVAL;
+		}
+	}
+
 	rc = raid_bdev->module->start(raid_bdev);
 	if (rc != 0) {
 		SPDK_ERRLOG("raid module startup callback failed\n");
@@ -1201,6 +1510,23 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	SPDK_DEBUGLOG(bdev_raid, "raid bdev generic %p\n", raid_bdev_gen);
 	SPDK_DEBUGLOG(bdev_raid, "raid bdev is created with name %s, raid_bdev %p\n",
 		      raid_bdev_gen->name, raid_bdev);
+
+	if (raid_bdev->superblock_enabled) {
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+			raid_bdev_base_bdev_super_validate(base_info, sb_recreate);
+			if (rc) {
+				SPDK_DEBUGLOG(bdev_raid, "super_validate for '%s' bdev has failed\n", base_info->name);
+				return rc;
+			}
+		}
+
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+			rc = raid_bdev_base_bdev_write_sb(base_info);
+			if (rc) {
+				SPDK_DEBUGLOG(bdev_raid, "Write superblock to '%s' bdev has failed\n", base_info->name);
+			}
+		}
+	}
 
 	return 0;
 }
@@ -1564,7 +1890,8 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 
 	if (raid_bdev->superblock_enabled) {
 		assert((RAID_BDEV_MIN_DATA_OFFSET_SIZE % bdev->blocklen) == 0);
-		base_info->data_offset = RAID_BDEV_MIN_DATA_OFFSET_SIZE / bdev->blocklen;
+		base_info->data_offset = spdk_max(RAID_BDEV_MIN_DATA_OFFSET_SIZE/bdev->blocklen,
+										  RAID_SB_BLOCKS(bdev->blocklen));
 
 		if (bdev->optimal_io_boundary) {
 			base_info->data_offset = spdk_divide_round_up(base_info->data_offset,
@@ -1573,7 +1900,7 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 
 		if (base_info->data_offset >= bdev->blockcnt) {
 			SPDK_ERRLOG("Data offset %lu exceeds base bdev capacity %lu on bdev '%s'\n",
-				    base_info->data_offset, bdev->blockcnt, base_info->name);
+					base_info->data_offset, bdev->blockcnt, base_info->name);
 			return -EINVAL;
 		}
 

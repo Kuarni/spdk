@@ -402,7 +402,8 @@ def bdev_raid_get_bdevs(client, category):
     return client.call('bdev_raid_get_bdevs', params)
 
 
-def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None, uuid=None, superblock=False):
+def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None, uuid=None, superblock=False,
+                     retrieve=False):
     """Create raid bdev. Either strip size arg will work but one is required.
 
     Args:
@@ -414,11 +415,12 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
         uuid: UUID for this raid bdev (optional)
         superblock: information about raid bdev will be stored in superblock on each base bdev,
                     disabled by default due to backward compatibility
+        retrieve: if specified, try to retrieve raid from superblock in base bdevs
 
     Returns:
         None
     """
-    params = {'name': name, 'raid_level': raid_level, 'base_bdevs': base_bdevs, 'superblock': superblock}
+    params = {'name': name, 'raid_level': raid_level, 'base_bdevs': base_bdevs, 'superblock': superblock,  'retrieve': retrieve}
 
     if strip_size:
         params['strip_size'] = strip_size
@@ -428,6 +430,22 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
 
     if uuid:
         params['uuid'] = uuid
+
+    return client.call('bdev_raid_create', params)
+
+
+def bdev_raid_retrieve(client, name, base_bdevs):
+    """Wrapper of bdev_raid_create. Tried to retrieve raid array from base bdevs.
+
+    Args:
+        name: user defined raid bdev name for retrieved raid
+        base_bdevs: Space separated names of retrieving array base bdevs in double quotes,
+                    like "Nvme0n1 Nvme1n1 Nvme2n1"
+
+    Returns:
+        None
+    """
+    params = {'name': name, 'raid_level': 'raid1', 'base_bdevs': base_bdevs, 'superblock': True, 'retrieve': True}
 
     return client.call('bdev_raid_create', params)
 

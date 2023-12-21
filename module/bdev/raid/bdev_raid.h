@@ -11,6 +11,10 @@
 
 #define RAID_BDEV_MIN_DATA_OFFSET_SIZE	(1024*1024) /* 1 MiB */
 
+#define RAID_SUPERBLOCK_MAGIC 0x534B5244 /* "SKRD" */
+
+#define RAID_SB_BLOCKS(bdev_blocklen) spdk_divide_round_up(sizeof(struct raid_superblock), bdev_blocklen)
+
 enum raid_level {
 	INVALID_RAID_LEVEL	= -1,
 	RAID0			= 0,
@@ -45,6 +49,51 @@ enum raid_bdev_state {
 
 typedef void (*raid_bdev_remove_base_bdev_cb)(void *ctx, int status);
 
+enum metadata_version {
+	RAID_METADATA_VERSION_01 = 01
+};
+
+#pragma pack(push, 1)
+/*
+ * Superblock for operation with metadata of the base bdev which part of some raid.
+ * It stores some metadata of the base bdev and the raid
+ */
+struct raid_superblock {
+	/* SPDK raid magic number "SKRD" */
+	uint32_t		magic;
+
+	/* The version of metadata. Currently, only 01 version exists */
+	uint32_t		version;
+
+	/* Logical block size of base bdev */
+	uint32_t		blocklen;
+
+	/* Number of base bdevs */
+	uint8_t			num_base_bdevs;
+
+	/* Raid Level of device's raid */
+	int32_t			level;
+
+	/* Position of device in raid */
+	uint32_t		array_position;
+
+	/* strip size of device's raid in blocks */
+	uint32_t		strip_size;
+
+	/* Number of blocks held by this base bdev */
+	uint64_t		blockcnt;
+
+	/* Number of blocks held by device's raid */
+	uint64_t		raid_blockcnt;
+
+	/* Timestamp to know the freshest device in raid */
+	struct timespec timestamp;
+
+	/* UUID of raid bdev */
+	struct spdk_uuid uuid;
+};
+#pragma pack(pop)
+
 /*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
  * raid. This structure contains the per base bdev information. Whatever is
@@ -59,6 +108,15 @@ struct raid_base_bdev_info {
 
 	/* pointer to base bdev descriptor opened by raid bdev */
 	struct spdk_bdev_desc	*desc;
+
+	/* position of the base bdev in raid_bdev's base_bdev_info (slot) */
+	uint32_t position;
+
+	/* indicate if the metadata was on disk or not */
+	bool is_new;
+
+	/* base bdev's superblock */
+	struct raid_superblock  *raid_sb;
 
 	/* offset in blocks from the start of the base bdev to the start of the data region */
 	uint64_t		data_offset;
@@ -138,6 +196,9 @@ struct raid_bdev {
 
 	/* state of raid bdev */
 	enum raid_bdev_state		state;
+
+	/* indicate if raid is new for  */
+	bool				is_new;
 
 	/* number of base bdevs comprising raid bdev  */
 	uint8_t				num_base_bdevs;
