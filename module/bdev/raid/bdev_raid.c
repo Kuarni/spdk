@@ -997,6 +997,7 @@ raid_bdev_module_init(struct raid_bdev *raid_bdev) {
     }
 
     raid_bdev->min_base_bdevs_operational = min_operational;
+    raid_bdev->module = module;
 
     return 0;
 }
