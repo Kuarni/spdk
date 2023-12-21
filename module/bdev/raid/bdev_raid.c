@@ -1289,6 +1289,8 @@ raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_in
     spdk_uuid_copy(&raid->bdev.uuid, &sb->uuid);
     raid->strip_size = sb->strip_size;
     raid->strip_size_kb = sb->strip_size * sb->blocklen;
+    raid->strip_size_shift = spdk_u32log2(sb->strip_size);
+    raid->blocklen_shift = spdk_u32log2(sb->blocklen);
 
     raid->is_new = false;
 
