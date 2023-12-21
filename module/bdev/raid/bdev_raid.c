@@ -1281,7 +1281,7 @@ raid_bdev_super_init_validation(struct raid_bdev *raid, struct raid_base_bdev_in
     raid->level = sb->level;
     raid->bdev.blocklen = sb->blocklen;
     raid->bdev.blockcnt = sb->raid_blockcnt;
-    raid->bdev.uuid = sb->uuid;
+    spdk_uuid_copy(&raid->bdev.uuid, &sb->uuid);
     raid->strip_size = sb->strip_size;
     raid->strip_size_kb = sb->strip_size * sb->blocklen;
 
@@ -1303,7 +1303,7 @@ raid_bdev_base_bdev_super_sync(struct raid_base_bdev_info *base_info)
     sb->array_position = base_info->position;
     sb->strip_size = raid->strip_size;
     sb->raid_blockcnt = raid->bdev.blockcnt;
-    sb->uuid = raid->bdev.uuid;
+    spdk_uuid_copy(&sb->uuid, &raid->bdev.uuid);
 
     memset(sb+1, 0, RAID_SB_BLOCKS(base_bdev->blocklen));
 
