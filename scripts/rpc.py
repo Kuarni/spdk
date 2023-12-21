@@ -2140,8 +2140,8 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('--uuid', help='UUID for this raid bdev', required=False)
     p.add_argument('-s', '--superblock', help='information about raid bdev will be stored in superblock on each base bdev, '
                                               'disabled by default due to backward compatibility', action='store_true')
-    p.add_argument('--retrieve', help='try to recreate raid from superblock on base bdevs, it works only if superblock'
-                                      'option specified', action='store_true')
+    p.add_argument('--retrieve', help='try to recreate raid from the superblock on the base bdevs, it only works if superblock'
+                                      'option is specified', action='store_true')
     p.set_defaults(func=bdev_raid_create)
 
     def bdev_raid_retrieve(args):
@@ -2152,9 +2152,9 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
         rpc.bdev.bdev_raid_retrieve(args.client,
                                   name=args.name,
                                   base_bdevs=base_bdevs)
-    p = subparsers.add_parser('bdev_raid_retrieve', help='Try to restore raid from metadata in base bdevs')
-    p.add_argument('-n', '--name', help='new name for retrieved raid', required=True)
-    p.add_argument('-b', '--base-bdevs', help='base bdevs name whiche have the superblock with raid metadata, '
+    p = subparsers.add_parser('bdev_raid_retrieve', help='Try to restore the raid from metadata on the base bdevs')
+    p.add_argument('-n', '--name', help='new name for the retrieved raid', required=True)
+    p.add_argument('-b', '--base-bdevs', help='name of the base bdevs which have the superblock with raid metadata, '
                                               'whitespace separated list in quotes', required=True)
     p.set_defaults(func=bdev_raid_retrieve)
 
