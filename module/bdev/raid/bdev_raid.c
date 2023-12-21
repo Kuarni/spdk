@@ -1400,8 +1400,8 @@ raid_bdev_analyse_superblocks(struct raid_bdev *raid_bdev, bool sb_recreate)
     }
 
     if (!freshest) {
-        SPDK_DEBUGLOG(bdev_raid, "There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
-        return 0;
+        SPDK_ERRLOG("There aren't base bdevs in raid bdev '%s'\n", raid_bdev->bdev.name);
+        return -EINVAL;
     }
 
     raid_bdev->is_new = true;
