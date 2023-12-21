@@ -2149,7 +2149,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
         for u in args.base_bdevs.strip().split(" "):
             base_bdevs.append(u)
 
-        rpc.bdev.bdev_raid_create(args.client,
+        rpc.bdev.bdev_raid_retrieve(args.client,
                                   name=args.name,
                                   base_bdevs=base_bdevs)
     p = subparsers.add_parser('bdev_raid_retrieve', help='Try to restore raid from metadata in base bdevs')

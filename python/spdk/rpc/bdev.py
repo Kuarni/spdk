@@ -445,9 +445,9 @@ def bdev_raid_retrieve(client, name, base_bdevs):
     Returns:
         None
     """
-    params = {'name': name, 'raid_level': "raid1", 'base_bdevs': base_bdevs, 'superblock': True, 'retrieve': True}
+    params = {'name': name, 'raid_level': 'raid1', 'base_bdevs': base_bdevs, 'superblock': True, 'retrieve': True}
 
-    return client.call('bdev_raid_retrieve', params)
+    return client.call('bdev_raid_create', params)
 
 
 def bdev_raid_delete(client, name):
