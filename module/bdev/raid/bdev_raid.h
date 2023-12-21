@@ -50,7 +50,7 @@ enum raid_bdev_state {
 typedef void (*raid_bdev_remove_base_bdev_cb)(void *ctx, int status);
 
 enum metadata_version {
-    RAID_METADATA_VERSION_01 = 01
+	RAID_METADATA_VERSION_01 = 01
 };
 
 #pragma pack(push, 1)
@@ -59,38 +59,38 @@ enum metadata_version {
  * It stores some metadata of the base bdev and the raid
  */
 struct raid_superblock {
-    /* SPDK raid magic number "SKRD" */
-    uint32_t        magic;
+	/* SPDK raid magic number "SKRD" */
+	uint32_t		magic;
 
-    /* The version of metadata. Currently, only 01 version exists */
-    uint32_t        version;
+	/* The version of metadata. Currently, only 01 version exists */
+	uint32_t		version;
 
-    /* Logical block size of base bdev */
-    uint32_t        blocklen;
+	/* Logical block size of base bdev */
+	uint32_t		blocklen;
 
-    /* Number of base bdevs */
-    uint8_t         num_base_bdevs;
+	/* Number of base bdevs */
+	uint8_t			num_base_bdevs;
 
-    /* Raid Level of device's raid */
-    int32_t        level;
+	/* Raid Level of device's raid */
+	int32_t			level;
 
-    /* Position of device in raid */
-    uint32_t        array_position;
+	/* Position of device in raid */
+	uint32_t		array_position;
 
-    /* strip size of device's raid in blocks */
-    uint32_t        strip_size;
+	/* strip size of device's raid in blocks */
+	uint32_t		strip_size;
 
-    /* Number of blocks held by this base bdev */
-    uint64_t        blockcnt;
+	/* Number of blocks held by this base bdev */
+	uint64_t		blockcnt;
 
-    /* Number of blocks held by device's raid */
-    uint64_t        raid_blockcnt;
+	/* Number of blocks held by device's raid */
+	uint64_t		raid_blockcnt;
 
-    /* Timestamp to know the freshest device in raid */
-    struct timespec timestamp;
+	/* Timestamp to know the freshest device in raid */
+	struct timespec timestamp;
 
-    /* UUID of raid bdev */
-    struct spdk_uuid uuid;
+	/* UUID of raid bdev */
+	struct spdk_uuid uuid;
 };
 #pragma pack(pop)
 
@@ -109,14 +109,14 @@ struct raid_base_bdev_info {
 	/* pointer to base bdev descriptor opened by raid bdev */
 	struct spdk_bdev_desc	*desc;
 
-    /* position of the base bdev in raid_bdev's base_bdev_info (slot) */
-    uint32_t position;
+	/* position of the base bdev in raid_bdev's base_bdev_info (slot) */
+	uint32_t position;
 
-    /* indicate if the metadata was on disk or not */
-    bool is_new;
+	/* indicate if the metadata was on disk or not */
+	bool is_new;
 
-    /* base bdev's superblock */
-    struct raid_superblock  *raid_sb;
+	/* base bdev's superblock */
+	struct raid_superblock  *raid_sb;
 
 	/* offset in blocks from the start of the base bdev to the start of the data region */
 	uint64_t		data_offset;
@@ -197,8 +197,8 @@ struct raid_bdev {
 	/* state of raid bdev */
 	enum raid_bdev_state		state;
 
-    /* indicate if raid is new for  */
-    bool                is_new;
+	/* indicate if raid is new for  */
+	bool				is_new;
 
 	/* number of base bdevs comprising raid bdev  */
 	uint8_t				num_base_bdevs;

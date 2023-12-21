@@ -134,8 +134,8 @@ struct rpc_bdev_raid_create {
 	/* If set, information about raid bdev will be stored in superblock on each base bdev */
 	bool                                 superblock_enabled;
 
-    /* If set, it tries to retrieve raid array from the base bdevs and fail if it can't */
-    bool                                 retrieve;
+	/* If set, it tries to retrieve raid array from the base bdevs and fail if it can't */
+	bool                                 retrieve;
 };
 
 /*
@@ -202,7 +202,7 @@ static const struct spdk_json_object_decoder rpc_bdev_raid_create_decoders[] = {
 	{"base_bdevs", offsetof(struct rpc_bdev_raid_create, base_bdevs), decode_base_bdevs},
 	{"uuid", offsetof(struct rpc_bdev_raid_create, uuid), spdk_json_decode_uuid, true},
 	{"superblock", offsetof(struct rpc_bdev_raid_create, superblock_enabled), spdk_json_decode_bool, true},
-    {"retrieve", offsetof(struct rpc_bdev_raid_create, retrieve), spdk_json_decode_bool, true}
+	{"retrieve", offsetof(struct rpc_bdev_raid_create, retrieve), spdk_json_decode_bool, true}
 };
 
 /*
@@ -232,12 +232,12 @@ rpc_bdev_raid_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-    if (!req.superblock_enabled && req.retrieve) {
-        spdk_jsonrpc_send_error_response_fmt(request, -EINVAL,
-                                             "Retrieve option can be only if superblock is specified: %s",
-                                             spdk_strerror(-EINVAL));
-        goto cleanup;
-    }
+	if (!req.superblock_enabled && req.retrieve) {
+		spdk_jsonrpc_send_error_response_fmt(request, -EINVAL,
+											 "Retrieve option can be only if superblock is specified: %s",
+											 spdk_strerror(-EINVAL));
+		goto cleanup;
+	}
 
 	rc = raid_bdev_create(req.name, req.strip_size_kb, req.base_bdevs.num_base_bdevs,
 			      req.level, req.superblock_enabled, &req.uuid, &raid_bdev);
@@ -248,9 +248,9 @@ rpc_bdev_raid_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-    if (req.retrieve) {
-        raid_bdev->is_new = false;
-    }
+	if (req.retrieve) {
+		raid_bdev->is_new = false;
+	}
 
 	for (i = 0; i < req.base_bdevs.num_base_bdevs; i++) {
 		const char *base_bdev_name = req.base_bdevs.base_bdevs[i];
