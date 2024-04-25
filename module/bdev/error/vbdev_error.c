@@ -31,6 +31,7 @@ static TAILQ_HEAD(, spdk_vbdev_error_config) g_error_config
 struct vbdev_error_info {
 	uint32_t			error_type;
 	uint32_t			error_num;
+	uint64_t			error_qd;
 	uint64_t			corrupt_offset;
 	uint8_t				corrupt_value;
 };
@@ -44,6 +45,7 @@ struct error_disk {
 
 struct error_channel {
 	struct spdk_bdev_part_channel	part_ch;
+	uint64_t			io_inflight;
 };
 
 static pthread_mutex_t g_vbdev_error_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -120,6 +122,7 @@ vbdev_error_inject_error(char *name, const struct vbdev_error_inject_opts *opts)
 		for (i = 0; i < SPDK_COUNTOF(error_disk->error_vector); i++) {
 			error_disk->error_vector[i].error_type = opts->error_type;
 			error_disk->error_vector[i].error_num = opts->error_num;
+			error_disk->error_vector[i].error_qd = opts->error_qd;
 			error_disk->error_vector[i].corrupt_offset = opts->corrupt_offset;
 			error_disk->error_vector[i].corrupt_value = opts->corrupt_value;
 		}
@@ -130,6 +133,7 @@ vbdev_error_inject_error(char *name, const struct vbdev_error_inject_opts *opts)
 	} else {
 		error_disk->error_vector[opts->io_type].error_type = opts->error_type;
 		error_disk->error_vector[opts->io_type].error_num = opts->error_num;
+		error_disk->error_vector[opts->io_type].error_qd = opts->error_qd;
 		error_disk->error_vector[opts->io_type].corrupt_offset = opts->corrupt_offset;
 		error_disk->error_vector[opts->io_type].corrupt_value = opts->corrupt_value;
 	}
@@ -199,7 +203,11 @@ vbdev_error_complete_request(struct spdk_bdev_io *bdev_io, bool success, void *c
 {
 	int status = success ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED;
 	struct error_disk *error_disk = bdev_io->bdev->ctxt;
+	struct error_channel *ch = spdk_io_channel_get_ctx(spdk_bdev_io_get_io_channel(bdev_io));
 	uint32_t error_type;
+
+	assert(ch->io_inflight > 0);
+	ch->io_inflight--;
 
 	if (success && bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
 		error_type = vbdev_error_get_error_type(error_disk, bdev_io->type);
@@ -229,10 +237,19 @@ vbdev_error_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bde
 	}
 
 	error_type = vbdev_error_get_error_type(error_disk, bdev_io->type);
+
+	if (ch->io_inflight < error_disk->error_vector[bdev_io->type].error_qd) {
+		error_type = 0;
+	}
+
 	switch (error_type) {
 	case VBDEV_IO_FAILURE:
 		error_disk->error_vector[bdev_io->type].error_num--;
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+		break;
+	case VBDEV_IO_NOMEM:
+		error_disk->error_vector[bdev_io->type].error_num--;
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
 		break;
 	case VBDEV_IO_PENDING:
 		TAILQ_INSERT_TAIL(&error_disk->pending_ios, bdev_io, module_link);
@@ -255,6 +272,7 @@ vbdev_error_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bde
 			SPDK_ERRLOG("bdev_error: submit request failed, rc=%d\n", rc);
 			spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		}
+		ch->io_inflight++;
 		break;
 	default:
 		assert(false);
@@ -352,7 +370,7 @@ _vbdev_error_create(const char *base_bdev_name, const struct spdk_uuid *uuid)
 		return -ENOMEM;
 	}
 
-	if (uuid) {
+	if (!spdk_uuid_is_null(uuid)) {
 		bdev = spdk_bdev_part_get_bdev(&disk->part);
 		spdk_uuid_copy(&bdev->uuid, uuid);
 	}
@@ -459,10 +477,7 @@ vbdev_error_config_add(const char *base_bdev_name, const struct spdk_uuid *uuid)
 		return -ENOMEM;
 	}
 
-	if (uuid) {
-		spdk_uuid_copy(&cfg->uuid, uuid);
-	}
-
+	spdk_uuid_copy(&cfg->uuid, uuid);
 	TAILQ_INSERT_TAIL(&g_error_config, cfg, tailq);
 
 	return 0;
@@ -518,7 +533,6 @@ static int
 vbdev_error_config_json(struct spdk_json_write_ctx *w)
 {
 	struct spdk_vbdev_error_config *cfg;
-	char uuid_str[SPDK_UUID_STRING_LEN];
 
 	TAILQ_FOREACH(cfg, &g_error_config, tailq) {
 		spdk_json_write_object_begin(w);
@@ -527,8 +541,7 @@ vbdev_error_config_json(struct spdk_json_write_ctx *w)
 		spdk_json_write_named_object_begin(w, "params");
 		spdk_json_write_named_string(w, "base_name", cfg->base_bdev);
 		if (!spdk_uuid_is_null(&cfg->uuid)) {
-			spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &cfg->uuid);
-			spdk_json_write_named_string(w, "uuid", uuid_str);
+			spdk_json_write_named_uuid(w, "uuid", &cfg->uuid);
 		}
 		spdk_json_write_object_end(w);
 

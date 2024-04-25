@@ -6,7 +6,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #define UNIT_TEST_NO_VTOPHYS
 
@@ -49,9 +49,6 @@ DEFINE_STUB_V(spdk_pci_unregister_error_handler, (spdk_pci_error_handler sighand
 DEFINE_STUB(spdk_pci_enumerate, int,
 	    (struct spdk_pci_driver *driver, spdk_pci_enum_cb enum_cb, void *enum_ctx),
 	    -1);
-
-DEFINE_STUB(nvme_transport_get_name, const char *, (const struct spdk_nvme_transport *transport),
-	    NULL);
 
 SPDK_LOG_REGISTER_COMPONENT(nvme)
 
@@ -1117,7 +1114,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_pcie", NULL, NULL);
@@ -1136,9 +1132,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvme_pcie_ctrlr_config_pmr);
 	CU_ADD_TEST(suite, test_nvme_pcie_ctrlr_map_io_pmr);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

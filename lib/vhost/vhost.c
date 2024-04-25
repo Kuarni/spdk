@@ -110,9 +110,8 @@ virtio_blk_get_transport_ops(const char *transport_name)
 
 int
 vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *mask_str,
-		   const struct spdk_json_val *params,
-		   const struct spdk_vhost_dev_backend *backend,
-		   const struct spdk_vhost_user_dev_backend *user_backend)
+		   const struct spdk_json_val *params, const struct spdk_vhost_dev_backend *backend,
+		   const struct spdk_vhost_user_dev_backend *user_backend, bool delay)
 {
 	struct spdk_cpuset cpumask = {};
 	int rc;
@@ -144,8 +143,10 @@ vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *ma
 
 	vdev->backend = backend;
 	if (vdev->backend->type == VHOST_BACKEND_SCSI) {
-		rc = vhost_user_dev_register(vdev, name, &cpumask, user_backend);
+		rc = vhost_user_dev_create(vdev, name, &cpumask, user_backend, delay);
 	} else {
+		/* When VHOST_BACKEND_BLK, delay should not be true. */
+		assert(delay == false);
 		rc = virtio_blk_construct_ctrlr(vdev, name, &cpumask, params, user_backend);
 	}
 	if (rc != 0) {
@@ -166,12 +167,14 @@ vhost_dev_unregister(struct spdk_vhost_dev *vdev)
 {
 	int rc;
 
+	spdk_vhost_lock();
 	if (vdev->backend->type == VHOST_BACKEND_SCSI) {
 		rc = vhost_user_dev_unregister(vdev);
 	} else {
 		rc = virtio_blk_destroy_ctrlr(vdev);
 	}
 	if (rc != 0) {
+		spdk_vhost_unlock();
 		return rc;
 	}
 
@@ -179,7 +182,6 @@ vhost_dev_unregister(struct spdk_vhost_dev *vdev)
 
 	free(vdev->name);
 
-	spdk_vhost_lock();
 	TAILQ_REMOVE(&g_vhost_devices, vdev, tailq);
 	if (TAILQ_EMPTY(&g_vhost_devices) && g_fini_cb != NULL) {
 		g_fini_cb();

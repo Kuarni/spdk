@@ -8,6 +8,18 @@
 #include "spdk/stdinc.h"
 #include "spdk/assert.h"
 
+/**
+ * Use `SPDK_DIF_APPTAG_IGNORE` and `SPDK_DIF_REFTAG_IGNORE`
+ * as the special values when creating DIF context, when the two
+ * values are used for Application Tag and Initialization Reference Tag,
+ * DIF library will fill the protection information fields with above
+ * values, based on the specification, when doing verify with
+ * above values in protection information field, the checking
+ * will be ignored.
+ */
+#define SPDK_DIF_REFTAG_IGNORE		0xFFFFFFFF
+#define SPDK_DIF_APPTAG_IGNORE		0xFFFF
+
 #define SPDK_DIF_FLAGS_REFTAG_CHECK	(1U << 26)
 #define SPDK_DIF_FLAGS_APPTAG_CHECK	(1U << 27)
 #define SPDK_DIF_FLAGS_GUARD_CHECK	(1U << 28)
@@ -32,7 +44,8 @@ enum spdk_dif_check_type {
 
 enum spdk_dif_pi_format {
 	SPDK_DIF_PI_FORMAT_16 = 1,
-	SPDK_DIF_PI_FORMAT_32 = 2
+	SPDK_DIF_PI_FORMAT_32 = 2,
+	SPDK_DIF_PI_FORMAT_64 = 3
 };
 
 struct spdk_dif_ctx_init_ext_opts {
@@ -86,10 +99,10 @@ struct spdk_dif_ctx {
 	 * Interim guard value is set if the last data block is partial, or
 	 * seed value is set otherwise.
 	 */
-	uint32_t		last_guard;
+	uint64_t		last_guard;
 
 	/* Seed value for guard computation */
-	uint32_t		guard_seed;
+	uint64_t		guard_seed;
 
 	/* Remapped initial reference tag. */
 	uint32_t		remapped_init_ref_tag;
@@ -135,7 +148,7 @@ struct spdk_dif_error {
 int spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_size,
 		      bool md_interleave, bool dif_loc, enum spdk_dif_type dif_type, uint32_t dif_flags,
 		      uint32_t init_ref_tag, uint16_t apptag_mask, uint16_t app_tag,
-		      uint32_t data_offset, uint32_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts);
+		      uint32_t data_offset, uint64_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts);
 
 /**
  * Update date offset of DIF context.

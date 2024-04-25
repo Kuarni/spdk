@@ -1021,7 +1021,8 @@ nvme_pcie_qpair_destroy(struct spdk_nvme_qpair *qpair)
 
 	nvme_qpair_deinit(qpair);
 
-	if (!pqpair->shared_stats && (qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr))) {
+	if (!pqpair->shared_stats && (!qpair->active_proc ||
+				      qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr))) {
 		if (qpair->id) {
 			free(pqpair->stat);
 		} else {
@@ -1149,7 +1150,7 @@ nvme_pcie_ctrlr_delete_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_
 	free(status);
 
 clear_shadow_doorbells:
-	if (pqpair->flags.has_shadow_doorbell) {
+	if (pqpair->flags.has_shadow_doorbell && ctrlr->shadow_doorbell) {
 		*pqpair->shadow_doorbell.sq_tdbl = 0;
 		*pqpair->shadow_doorbell.cq_hdbl = 0;
 		*pqpair->shadow_doorbell.sq_eventidx = 0;

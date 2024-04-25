@@ -18,6 +18,7 @@
 extern "C" {
 #endif
 
+#include "spdk/dma.h"
 #include "spdk/env.h"
 #include "spdk/nvme_spec.h"
 #include "spdk/nvmf_spec.h"
@@ -296,6 +297,13 @@ SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ctrlr_opts) == 824, "Incorrect size")
 typedef void (*spdk_nvme_accel_completion_cb)(void *cb_arg, int status);
 
 /**
+ * Completion callback for a single operation in a sequence.
+ *
+ * \param cb_arg Argument provided by the user when appending an operation to a sequence.
+ */
+typedef void (*spdk_nvme_accel_step_cb)(void *cb_arg);
+
+/**
  * Function table for the NVMe accelerator device.
  *
  * This table provides a set of APIs to allow user to leverage
@@ -314,6 +322,20 @@ struct spdk_nvme_accel_fn_table {
 	/** The accelerated crc32c function. */
 	void (*submit_accel_crc32c)(void *ctx, uint32_t *dst, struct iovec *iov,
 				    uint32_t iov_cnt, uint32_t seed, spdk_nvme_accel_completion_cb cb_fn, void *cb_arg);
+
+	/** Finish an accel sequence */
+	void (*finish_sequence)(void *seq, spdk_nvme_accel_completion_cb cb_fn, void *cb_arg);
+
+	/** Reverse an accel sequence */
+	void (*reverse_sequence)(void *seq);
+
+	/** Abort an accel sequence */
+	void (*abort_sequence)(void *seq);
+
+	/** Append a crc32c operation to a sequence */
+	int (*append_crc32c)(void *ctx, void **seq, uint32_t *dst, struct iovec *iovs, uint32_t iovcnt,
+			     struct spdk_memory_domain *memory_domain, void *domain_ctx,
+			     uint32_t seed, spdk_nvme_accel_step_cb cb_fn, void *cb_arg);
 };
 
 /**
@@ -571,6 +593,7 @@ enum spdk_nvme_ctrlr_flags {
 	SPDK_NVME_CTRLR_ZONE_APPEND_SUPPORTED		= 1 << 5, /**< Zone Append is supported (within Zoned Namespaces) */
 	SPDK_NVME_CTRLR_DIRECTIVES_SUPPORTED		= 1 << 6, /**< The Directives is supported */
 	SPDK_NVME_CTRLR_MPTR_SGL_SUPPORTED		= 1 << 7, /**< MPTR containing SGL descriptor is supported */
+	SPDK_NVME_CTRLR_ACCEL_SEQUENCE_SUPPORTED	= 1 << 8, /**< Support for sending I/O requests with accel sequnece */
 };
 
 /**
@@ -596,8 +619,12 @@ struct spdk_nvme_ns_cmd_ext_io_opts {
 	uint16_t apptag;
 	/** Command dword 13 specific field. */
 	uint32_t cdw13;
+	/** Accel sequence (only valid if SPDK_NVME_CTRLR_ACCEL_SEQUENCE_SUPPORTED is set and the
+	 *  qpair is part of a poll group).
+	 */
+	void *accel_sequence;
 };
-SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ns_cmd_ext_io_opts) == 48, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ns_cmd_ext_io_opts) == 56, "Incorrect size");
 
 /**
  * Parse the string representation of a transport ID.

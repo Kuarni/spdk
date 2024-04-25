@@ -28,6 +28,7 @@ function usage() {
 	echo " --cross-prefix=prefix     Prefix for cross compilation (default: none)"
 	echo "                           example: aarch64-linux-gnu"
 	echo " --libdir=path             Configure installation path for the libraries (default: \$prefix/lib)"
+	echo " --pydir=path              Configure installation path for the python libraries"
 	echo " --max-lcores=VAL          DPDK configuration. VAL defines maximum number of lcores supported"
 	echo "                           by EAL, or enables autodetection if set to 'detect'. When 'detect'"
 	echo "                           is specified, DPDK will detect number of cores in the system during"
@@ -127,6 +128,8 @@ function usage() {
 	echo " --without-sma             No path required."
 	echo " --with-avahi              Build with Avahi mDNS discovery client service enabled in bdev-nvme module."
 	echo " --without-avahi           No path required."
+	echo " --with-golang             Build with components written in Go"
+	echo " --without-golang          No path required."
 	echo ""
 	echo "Environment variables:"
 	echo ""
@@ -297,6 +300,9 @@ for i in "$@"; do
 			;;
 		--libdir=*)
 			CONFIG[LIBDIR]="${i#*=}"
+			;;
+		--pydir=*)
+			CONFIG[PYDIR]="${i#*=}"
 			;;
 		--enable-debug)
 			CONFIG[DEBUG]=y
@@ -654,6 +660,12 @@ for i in "$@"; do
 		--without-avahi)
 			CONFIG[AVAHI]=n
 			;;
+		--with-golang)
+			CONFIG[GOLANG]=y
+			;;
+		--without-golang)
+			CONFIG[GOLANG]=n
+			;;
 		--max-lcores='')
 			echo "Must specify max number of lcores for --max-lcores"
 			usage
@@ -778,7 +790,6 @@ else
 fi
 
 if [ "${CONFIG[VTUNE]}" = "y" ]; then
-	echo "WARNING: VTune support is deprecated."
 	if [ -z "${CONFIG[VTUNE_DIR]}" ]; then
 		echo "When VTune is enabled, you must specify the VTune directory using --with-vtune=path"
 		exit 1
@@ -929,7 +940,6 @@ function mlx5_build() {
 }
 
 if [[ "${CONFIG[VBDEV_COMPRESS]}" = "y" ]]; then
-	echo "WARNING: PMDK - Persistent device support with bdev_compress is deprecated."
 	if ! echo -e '#include <libpmem.h>\nint main(void) { return 0; }\n' \
 		| "${BUILD_CMD[@]}" -lpmem - 2> /dev/null; then
 		echo "--with-vbdev-compress requires libpmem."
@@ -1261,6 +1271,14 @@ if [[ "${CONFIG[AVAHI]}" = "y" ]]; then
 		'int main(void) { return 0; }\n' \
 		| "${BUILD_CMD[@]}" -lavahi-client -lavahi-common - 2> /dev/null; then
 		echo "--with-avahi requires libavahi-client and libavahi-common."
+		echo "Please install then re-run this script."
+		exit 1
+	fi
+fi
+
+if [[ "${CONFIG[GOLANG]}" = "y" ]]; then
+	if ! go version 2> /dev/null; then
+		echo "--with-golang requires Go installation."
 		echo "Please install then re-run this script."
 		exit 1
 	fi

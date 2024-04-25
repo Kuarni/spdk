@@ -98,7 +98,10 @@ union spdk_nvme_cap_register {
 		/** persistent memory region supported */
 		uint32_t pmrs		: 1;
 
-		uint32_t reserved3	: 7;
+		/** controller memory buffer supported */
+		uint32_t cmbs		: 1;
+
+		uint32_t reserved3	: 6;
 	} bits;
 };
 SPDK_STATIC_ASSERT(sizeof(union spdk_nvme_cap_register) == 8, "Incorrect size");
@@ -3017,6 +3020,18 @@ struct spdk_nvme_zns_ns_data {
 	uint8_t			vendor_specific[256];
 };
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_zns_ns_data) == 4096, "Incorrect size");
+
+/**
+ * IO command set vector for IDENTIFY_IOCS
+ */
+struct spdk_nvme_iocs_vector {
+	uint8_t	nvm  : 1;
+	uint8_t	kv   : 1;
+	uint8_t	zns  : 1;
+	uint8_t	rsvd : 5;
+	uint8_t	rsvd2[7];
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_iocs_vector) == 8, "Incorrect size");
 
 /**
  * Deallocated logical block features - read value

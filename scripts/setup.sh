@@ -18,9 +18,9 @@ source "$rootdir/scripts/common.sh"
 
 function usage() {
 	if [[ $os == Linux ]]; then
-		options="[config|reset|status|cleanup|help]"
+		options="[config|reset|status|cleanup|interactive|help]"
 	else
-		options="[config|reset|help]"
+		options="[config|reset|interactive|help]"
 	fi
 
 	[[ -n $2 ]] && (
@@ -44,6 +44,7 @@ function usage() {
 	if [[ $os == Linux ]]; then
 		echo "status            Print status of all SPDK-compatible devices on the system."
 	fi
+	echo "interactive       Executes script in interactive mode."
 	echo "help              Print this help message."
 	echo
 	echo "The following environment variables can be specified."
@@ -230,7 +231,7 @@ function get_block_dev_from_bdf() {
 
 	for block in /sys/block/*; do
 		if [[ $block == *nvme* ]]; then
-			ctrl=${block##*/} ctrl=${ctrl%n*}
+			ctrl=$(readlink -f "$block/device") ctrl=${ctrl##*/}
 			if [[ -e /sys/class/nvme/$ctrl && $(< "/sys/class/nvme/$ctrl/address") == "$bdf" ]]; then
 				blocks+=("${block##*/}")
 			fi
@@ -291,13 +292,14 @@ function collect_devices() {
 	ids+="|PCI_DEVICE_ID_INTEL_VMD"
 	ids+="|SPDK_PCI_CLASS_NVME"
 
-	local -gA nvme_d ioat_d dsa_d iaa_d virtio_d vmd_d all_devices_d drivers_d
+	local -gA nvme_d ioat_d dsa_d iaa_d virtio_d vmd_d all_devices_d drivers_d types_d all_devices_type_d
 
 	while read -r _ dev_type dev_id; do
 		bdfs=(${pci_bus_cache["0x8086:$dev_id"]})
 		[[ $dev_type == *NVME* ]] && bdfs=(${pci_bus_cache["$dev_id"]})
 		[[ $dev_type == *VIRT* ]] && bdfs=(${pci_bus_cache["0x1af4:$dev_id"]})
 		[[ $dev_type =~ (NVME|IOAT|DSA|IAA|VIRTIO|VMD) ]] && dev_type=${BASH_REMATCH[1],,}
+		types_d["$dev_type"]=1
 		for bdf in "${bdfs[@]}"; do
 			in_use=0
 			if [[ $1 != status ]]; then
@@ -330,9 +332,12 @@ function collect_devices() {
 			fi
 			eval "${dev_type}_d[$bdf]=$in_use"
 			all_devices_d["$bdf"]=$in_use
+			all_devices_type_d["$bdf"]=$dev_type
 			if [[ -e /sys/bus/pci/devices/$bdf/driver ]]; then
 				driver=$(readlink -f "/sys/bus/pci/devices/$bdf/driver")
 				drivers_d["$bdf"]=${driver##*/}
+			else
+				drivers_d["$bdf"]=""
 			fi
 		done
 	done < <(grep -E "$ids" "$rootdir/include/spdk/pci_ids.h")
@@ -815,6 +820,17 @@ function reset_freebsd() {
 	kldunload nic_uio.ko || true
 }
 
+function set_hp() {
+	if [[ -n $HUGEPGSZ && ! -e /sys/kernel/mm/hugepages/hugepages-${HUGEPGSZ}kB ]]; then
+		echo "${HUGEPGSZ}kB is not supported by the running kernel, ignoring" >&2
+		unset -v HUGEPGSZ
+	fi
+
+	HUGEPGSZ=${HUGEPGSZ:-$(grep Hugepagesize /proc/meminfo | cut -d : -f 2 | tr -dc '0-9')}
+	HUGEPGSZ_MB=$((HUGEPGSZ / 1024))
+	NRHUGE=${NRHUGE:-$(((HUGEMEM + HUGEPGSZ_MB - 1) / HUGEPGSZ_MB))}
+}
+
 CMD=reset cache_pci_bus
 
 mode=$1
@@ -844,6 +860,15 @@ fi
 
 collect_devices "$mode"
 
+if [[ $os == Linux ]]; then
+	set_hp
+fi
+
+if [[ $mode == interactive ]]; then
+	source "$rootdir/scripts/common/setup/interactive.sh"
+	main_menu "$2" || exit 0
+fi
+
 if [[ $mode == reset && $PCI_BLOCK_SYNC_ON_RESET == yes ]]; then
 	# Note that this will wait only for the first block device attached to
 	# a given storage controller. For nvme this may miss some of the devs
@@ -870,15 +895,6 @@ if [[ $mode == reset && $PCI_BLOCK_SYNC_ON_RESET == yes ]]; then
 fi
 
 if [[ $os == Linux ]]; then
-	if [[ -n $HUGEPGSZ && ! -e /sys/kernel/mm/hugepages/hugepages-${HUGEPGSZ}kB ]]; then
-		echo "${HUGEPGSZ}kB is not supported by the running kernel, ignoring" >&2
-		unset -v HUGEPGSZ
-	fi
-
-	HUGEPGSZ=${HUGEPGSZ:-$(grep Hugepagesize /proc/meminfo | cut -d : -f 2 | tr -dc '0-9')}
-	HUGEPGSZ_MB=$((HUGEPGSZ / 1024))
-	: ${NRHUGE=$(((HUGEMEM + HUGEPGSZ_MB - 1) / HUGEPGSZ_MB))}
-
 	if [ "$mode" == "config" ]; then
 		configure_linux
 	elif [ "$mode" == "cleanup" ]; then

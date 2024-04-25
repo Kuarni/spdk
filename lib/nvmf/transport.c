@@ -97,23 +97,15 @@ nvmf_transport_dump_opts(struct spdk_nvmf_transport *transport, struct spdk_json
 }
 
 void
-nvmf_transport_listen_dump_opts(struct spdk_nvmf_transport *transport,
-				const struct spdk_nvme_transport_id *trid, struct spdk_json_write_ctx *w)
+nvmf_transport_listen_dump_trid(const struct spdk_nvme_transport_id *trid,
+				struct spdk_json_write_ctx *w)
 {
 	const char *adrfam = spdk_nvme_transport_id_adrfam_str(trid->adrfam);
-
-	spdk_json_write_named_object_begin(w, "listen_address");
 
 	spdk_json_write_named_string(w, "trtype", trid->trstring);
 	spdk_json_write_named_string(w, "adrfam", adrfam ? adrfam : "unknown");
 	spdk_json_write_named_string(w, "traddr", trid->traddr);
 	spdk_json_write_named_string(w, "trsvcid", trid->trsvcid);
-
-	spdk_json_write_object_end(w);
-
-	if (transport->ops->listen_dump_opts) {
-		transport->ops->listen_dump_opts(transport, trid, w);
-	}
 }
 
 spdk_nvme_transport_type_t
@@ -173,6 +165,12 @@ struct nvmf_transport_create_ctx {
 	spdk_nvmf_transport_create_done_cb cb_fn;
 };
 
+static bool
+nvmf_transport_use_iobuf(struct spdk_nvmf_transport *transport)
+{
+	return transport->opts.num_shared_buffers || transport->opts.buf_cache_size;
+}
+
 static void
 nvmf_transport_create_async_done(void *cb_arg, struct spdk_nvmf_transport *transport)
 {
@@ -188,14 +186,14 @@ nvmf_transport_create_async_done(void *cb_arg, struct spdk_nvmf_transport *trans
 	TAILQ_INIT(&transport->listeners);
 	transport->ops = ctx->ops;
 	transport->opts = ctx->opts;
-	chars_written = snprintf(transport->iobuf_name, MAX_MEMPOOL_NAME_LENGTH, "%s_%s_%s", "spdk_nvmf",
-				 transport->ops->name, "data");
+	chars_written = snprintf(transport->iobuf_name, MAX_MEMPOOL_NAME_LENGTH, "%s_%s", "nvmf",
+				 transport->ops->name);
 	if (chars_written < 0) {
 		SPDK_ERRLOG("Unable to generate transport data buffer pool name.\n");
 		goto err;
 	}
 
-	if (ctx->opts.num_shared_buffers) {
+	if (nvmf_transport_use_iobuf(transport)) {
 		spdk_iobuf_register_module(transport->iobuf_name);
 	}
 
@@ -265,6 +263,10 @@ nvmf_transport_create(const char *transport_name, struct spdk_nvmf_transport_opt
 	}
 
 	spdk_iobuf_get_opts(&opts_iobuf);
+	if (ctx->opts.io_unit_size == 0) {
+		SPDK_ERRLOG("io_unit_size cannot be 0\n");
+		goto err;
+	}
 	if (ctx->opts.io_unit_size > opts_iobuf.large_bufsize) {
 		SPDK_ERRLOG("io_unit_size %u is larger than iobuf pool large buffer size %d\n",
 			    ctx->opts.io_unit_size, opts_iobuf.large_bufsize);
@@ -366,7 +368,7 @@ spdk_nvmf_transport_destroy(struct spdk_nvmf_transport *transport,
 		free(listener);
 	}
 
-	if (transport->opts.num_shared_buffers) {
+	if (nvmf_transport_use_iobuf(transport)) {
 		spdk_iobuf_unregister_module(transport->iobuf_name);
 	}
 
@@ -577,8 +579,8 @@ nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport,
 
 	STAILQ_INIT(&tgroup->pending_buf_queue);
 
-	if (transport->opts.buf_cache_size == 0) {
-		/* We aren't going to allocate any buffers for the cache, so just return now. */
+	if (!nvmf_transport_use_iobuf(transport)) {
+		/* We aren't going to allocate any shared buffers or cache, so just return now. */
 		return tgroup;
 	}
 
@@ -611,20 +613,27 @@ nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport,
 		large_cache_size = buf_cache_size;
 	}
 
-	rc = spdk_iobuf_channel_init(&tgroup->buf_cache, transport->iobuf_name,
-				     small_cache_size, large_cache_size);
+	tgroup->buf_cache = calloc(1, sizeof(*tgroup->buf_cache));
+	if (!tgroup->buf_cache) {
+		SPDK_ERRLOG("Unable to allocate an iobuf channel in the poll group.\n");
+		goto err;
+	}
 
+	rc = spdk_iobuf_channel_init(tgroup->buf_cache, transport->iobuf_name, small_cache_size,
+				     large_cache_size);
 	if (rc != 0) {
 		SPDK_ERRLOG("Unable to reserve the full number of buffers for the pg buffer cache.\n");
-		rc = spdk_iobuf_channel_init(&tgroup->buf_cache, transport->iobuf_name, 0, 0);
+		rc = spdk_iobuf_channel_init(tgroup->buf_cache, transport->iobuf_name, 0, 0);
 		if (rc != 0) {
 			SPDK_ERRLOG("Unable to create an iobuf channel in the poll group.\n");
-			transport->ops->poll_group_destroy(tgroup);
-			return NULL;
+			goto err;
 		}
 	}
 
 	return tgroup;
+err:
+	transport->ops->poll_group_destroy(tgroup);
+	return NULL;
 }
 
 struct spdk_nvmf_transport_poll_group *
@@ -648,7 +657,7 @@ void
 nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 {
 	struct spdk_nvmf_transport *transport;
-	struct spdk_iobuf_channel ch;
+	struct spdk_iobuf_channel *ch = NULL;
 
 	transport = group->transport;
 
@@ -656,11 +665,10 @@ nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 		SPDK_ERRLOG("Pending I/O list wasn't empty on poll group destruction\n");
 	}
 
-	if (transport->opts.buf_cache_size) {
-		/* The call to poll_group_destroy both frees the group memory,
-		 * but also releases any remaining buffers. Make a copy of
-		 * the channel onto the stack so we can still release the
-		 * resources after the group has been freed. */
+	if (nvmf_transport_use_iobuf(transport)) {
+		/* The call to poll_group_destroy both frees the group memory, but also
+		 * releases any remaining buffers. Cache channel pointer so we can still
+		 * release the resources after the group has been freed. */
 		ch = group->buf_cache;
 	}
 
@@ -668,8 +676,9 @@ nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 	transport->ops->poll_group_destroy(group);
 	pthread_mutex_unlock(&transport->mutex);
 
-	if (transport->opts.buf_cache_size) {
-		spdk_iobuf_channel_fini(&ch);
+	if (nvmf_transport_use_iobuf(transport)) {
+		spdk_iobuf_channel_fini(ch);
+		free(ch);
 	}
 }
 
@@ -807,7 +816,7 @@ spdk_nvmf_request_free_buffers(struct spdk_nvmf_request *req,
 	uint32_t i;
 
 	for (i = 0; i < req->iovcnt; i++) {
-		spdk_iobuf_put(&group->buf_cache, req->iov[i].iov_base, req->iov[i].iov_len);
+		spdk_iobuf_put(group->buf_cache, req->iov[i].iov_base, req->iov[i].iov_len);
 		req->iov[i].iov_base = NULL;
 		req->iov[i].iov_len = 0;
 	}
@@ -849,7 +858,7 @@ nvmf_request_get_buffers(struct spdk_nvmf_request *req,
 	}
 
 	while (i < num_buffers) {
-		buffer = spdk_iobuf_get(&group->buf_cache, spdk_min(io_unit_size, length), NULL, NULL);
+		buffer = spdk_iobuf_get(group->buf_cache, spdk_min(io_unit_size, length), NULL, NULL);
 		if (buffer == NULL) {
 			return -ENOMEM;
 		}
@@ -869,6 +878,8 @@ spdk_nvmf_request_get_buffers(struct spdk_nvmf_request *req,
 			      uint32_t length)
 {
 	int rc;
+
+	assert(nvmf_transport_use_iobuf(transport));
 
 	req->iovcnt = 0;
 	rc = nvmf_request_get_buffers(req, group, transport, length,
@@ -907,7 +918,7 @@ nvmf_request_free_stripped_buffers(struct spdk_nvmf_request *req,
 	uint32_t i;
 
 	for (i = 0; i < data->iovcnt; i++) {
-		spdk_iobuf_put(&group->buf_cache, data->iov[i].iov_base, data->iov[i].iov_len);
+		spdk_iobuf_put(group->buf_cache, data->iov[i].iov_base, data->iov[i].iov_len);
 	}
 	free(data);
 	req->stripped_data = NULL;

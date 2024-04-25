@@ -5,7 +5,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "event/reactor.c"
 #include "spdk/thread.h"
@@ -16,20 +16,25 @@
 static void
 test_create_reactor(void)
 {
-	/* See SPDK issue #3004.  Seems like a bug with gcc + asan on Fedora 38, so
-	 * we need to explicitly align the variable here.
-	 */
-	struct spdk_reactor reactor __attribute__((aligned(SPDK_CACHE_LINE_SIZE))) = {};
+	struct spdk_reactor *reactor;
+	int rc;
 
-	g_reactors = &reactor;
+	/* See SPDK issue #3004.  Seems like a bug with gcc + asan on Fedora 38, so we can't
+	 * allocate g_reactors on the stack and need to explicitly used aligned allocation here.
+	 */
+	rc = posix_memalign((void **)&reactor, SPDK_CACHE_LINE_SIZE, sizeof(*reactor));
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+
+	g_reactors = reactor;
 	g_reactor_count = 1;
 
-	reactor_construct(&reactor, 0);
+	reactor_construct(reactor, 0);
 
-	CU_ASSERT(spdk_reactor_get(0) == &reactor);
+	CU_ASSERT(spdk_reactor_get(0) == reactor);
 
-	spdk_ring_free(reactor.events);
-	reactor_interrupt_fini(&reactor);
+	spdk_ring_free(reactor->events);
+	reactor_interrupt_fini(reactor);
+	free(reactor);
 	g_reactors = NULL;
 }
 
@@ -1086,7 +1091,6 @@ main(int argc, char **argv)
 	CU_pSuite suite = NULL;
 	unsigned int num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("app_suite", NULL, NULL);
@@ -1102,9 +1106,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_scheduler);
 	CU_ADD_TEST(suite, test_governor);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	return num_failures;

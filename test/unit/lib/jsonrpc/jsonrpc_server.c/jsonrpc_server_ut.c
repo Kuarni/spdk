@@ -5,7 +5,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "jsonrpc/jsonrpc_server.c"
 
@@ -173,6 +173,8 @@ test_parse_request(void)
 
 	conn = calloc(1, sizeof(*conn));
 	SPDK_CU_ASSERT_FATAL(conn != NULL);
+	pthread_spin_init(&conn->queue_lock, PTHREAD_PROCESS_PRIVATE);
+	STAILQ_INIT(&conn->outstanding_queue);
 
 	conn->server = server;
 
@@ -310,6 +312,8 @@ test_parse_request_streaming(void)
 
 	conn = calloc(1, sizeof(*conn));
 	SPDK_CU_ASSERT_FATAL(conn != NULL);
+	pthread_spin_init(&conn->queue_lock, PTHREAD_PROCESS_PRIVATE);
+	STAILQ_INIT(&conn->outstanding_queue);
 
 	conn->server = server;
 
@@ -362,18 +366,15 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("jsonrpc", NULL, NULL);
 
 	CU_ADD_TEST(suite, test_parse_request);
 	CU_ADD_TEST(suite, test_parse_request_streaming);
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	/* This is for ASAN. Don't know why but if pointer is left in global variable

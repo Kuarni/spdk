@@ -29,7 +29,8 @@ static int g_zcopy;
 static int g_ktls;
 static int g_tls_version;
 static bool g_verbose;
-static char *g_psk_key;
+static uint8_t g_psk_key[SPDK_TLS_PSK_MAX_LEN];
+static uint32_t g_psk_key_size;
 static char *g_psk_identity;
 
 /*
@@ -44,7 +45,8 @@ struct hello_context_t {
 	int zcopy;
 	int ktls;
 	int tls_version;
-	char *psk_key;
+	uint8_t *psk_key;
+	uint32_t psk_key_size;
 	char *psk_identity;
 
 	bool verbose;
@@ -60,6 +62,7 @@ struct hello_context_t {
 	struct spdk_poller *time_out;
 
 	int rc;
+	ssize_t n;
 };
 
 /*
@@ -88,9 +91,22 @@ hello_sock_usage(void)
 static int
 hello_sock_parse_arg(int ch, char *arg)
 {
+	char *unhexlified;
+
 	switch (ch) {
 	case 'E':
-		g_psk_key = arg;
+		g_psk_key_size = strlen(arg) / 2;
+		if (g_psk_key_size > SPDK_TLS_PSK_MAX_LEN) {
+			fprintf(stderr, "Invalid PSK: too long (%"PRIu32")\n", g_psk_key_size);
+			return -EINVAL;
+		}
+		unhexlified = spdk_unhexlify(arg);
+		if (unhexlified == NULL) {
+			fprintf(stderr, "Invalid PSK: not in a hex format\n");
+			return -EINVAL;
+		}
+		memcpy(g_psk_key, unhexlified, g_psk_key_size);
+		free(unhexlified);
 		break;
 	case 'H':
 		g_host = arg;
@@ -185,6 +201,7 @@ hello_sock_recv_poll(void *arg)
 			return SPDK_POLLER_IDLE;
 		}
 
+		hello_sock_quit(ctx, -1);
 		SPDK_ERRLOG("spdk_sock_recv() failed, errno %d: %s\n",
 			    errno, spdk_strerror(errno));
 		return SPDK_POLLER_BUSY;
@@ -204,11 +221,28 @@ hello_sock_writev_poll(void *arg)
 {
 	struct hello_context_t *ctx = arg;
 	int rc = 0;
-	char buf_out[BUFFER_SIZE];
 	struct iovec iov;
 	ssize_t n;
 
-	n = read(STDIN_FILENO, buf_out, sizeof(buf_out));
+	/* If previously we could not send any bytes, we should try again with the same buffer. */
+	if (ctx->n != 0) {
+		iov.iov_base = ctx->buf;
+		iov.iov_len = ctx->n;
+		errno = 0;
+		rc = spdk_sock_writev(ctx->sock, &iov, 1);
+		if (rc < 0) {
+			if (errno == EAGAIN) {
+				return SPDK_POLLER_BUSY;
+			}
+			SPDK_ERRLOG("Write to socket failed. Closing connection...\n");
+			hello_sock_quit(ctx, -1);
+			return SPDK_POLLER_IDLE;
+		}
+		ctx->bytes_out += rc;
+		ctx->n = 0;
+	}
+
+	n = read(STDIN_FILENO, ctx->buf, BUFFER_SIZE);
 	if (n == 0 || !g_is_running) {
 		/* EOF */
 		SPDK_NOTICELOG("Closing connection...\n");
@@ -219,13 +253,24 @@ hello_sock_writev_poll(void *arg)
 		/*
 		 * Send message to the server
 		 */
-		iov.iov_base = buf_out;
+		iov.iov_base = ctx->buf;
 		iov.iov_len = n;
+		errno = 0;
 		rc = spdk_sock_writev(ctx->sock, &iov, 1);
+		if (rc < 0) {
+			if (errno == EAGAIN) {
+				ctx->n = n;
+			} else {
+				SPDK_ERRLOG("Write to socket failed. Closing connection...\n");
+				hello_sock_quit(ctx, -1);
+				return SPDK_POLLER_IDLE;
+			}
+		}
 		if (rc > 0) {
 			ctx->bytes_out += rc;
 		}
 	}
+
 	return rc > 0 ? SPDK_POLLER_BUSY : SPDK_POLLER_IDLE;
 }
 
@@ -238,36 +283,20 @@ hello_sock_connect(struct hello_context_t *ctx)
 	struct spdk_sock_impl_opts impl_opts;
 	size_t impl_opts_size = sizeof(impl_opts);
 	struct spdk_sock_opts opts;
-	char psk[SPDK_TLS_PSK_MAX_LEN] = {};
-	char *unhexlified;
 
 	spdk_sock_impl_get_opts(ctx->sock_impl_name, &impl_opts, &impl_opts_size);
 	impl_opts.enable_ktls = ctx->ktls;
 	impl_opts.tls_version = ctx->tls_version;
 	impl_opts.psk_identity = ctx->psk_identity;
 	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
+	impl_opts.psk_key = ctx->psk_key;
+	impl_opts.psk_key_size = ctx->psk_key_size;
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
 	opts.zcopy = ctx->zcopy;
 	opts.impl_opts = &impl_opts;
 	opts.impl_opts_size = sizeof(impl_opts);
-
-	if (ctx->psk_key) {
-		impl_opts.psk_key_size = strlen(ctx->psk_key) / 2;
-		if (impl_opts.psk_key_size > SPDK_TLS_PSK_MAX_LEN) {
-			SPDK_ERRLOG("Insufficient buffer size for PSK");
-			return -EINVAL;
-		}
-		unhexlified = spdk_unhexlify(ctx->psk_key);
-		if (unhexlified == NULL) {
-			SPDK_ERRLOG("Could not unhexlify PSK");
-			return -EINVAL;
-		}
-		memcpy(psk, unhexlified, impl_opts.psk_key_size);
-		free(unhexlified);
-		impl_opts.psk_key = psk;
-	}
 
 	SPDK_NOTICELOG("Connecting to the server on %s:%d with sock_impl(%s)\n", ctx->host, ctx->port,
 		       ctx->sock_impl_name);
@@ -328,9 +357,8 @@ hello_sock_cb(void *arg, struct spdk_sock_group *group, struct spdk_sock *sock)
 		}
 	}
 
-	iov.iov_len = rc;
-
-	if (iov.iov_len > 0) {
+	if (rc > 0) {
+		iov.iov_len = rc;
 		ctx->bytes_in += iov.iov_len;
 		n = spdk_sock_writev(sock, &iov, 1);
 		if (n > 0) {
@@ -417,36 +445,20 @@ hello_sock_listen(struct hello_context_t *ctx)
 	struct spdk_sock_impl_opts impl_opts;
 	size_t impl_opts_size = sizeof(impl_opts);
 	struct spdk_sock_opts opts;
-	static char psk[SPDK_TLS_PSK_MAX_LEN] = {};
-	char *unhexlified;
 
 	spdk_sock_impl_get_opts(ctx->sock_impl_name, &impl_opts, &impl_opts_size);
 	impl_opts.enable_ktls = ctx->ktls;
 	impl_opts.tls_version = ctx->tls_version;
 	impl_opts.psk_identity = ctx->psk_identity;
 	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
+	impl_opts.psk_key = ctx->psk_key;
+	impl_opts.psk_key_size = ctx->psk_key_size;
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
 	opts.zcopy = ctx->zcopy;
 	opts.impl_opts = &impl_opts;
 	opts.impl_opts_size = sizeof(impl_opts);
-
-	if (ctx->psk_key) {
-		impl_opts.psk_key_size = strlen(ctx->psk_key) / 2;
-		if (impl_opts.psk_key_size > SPDK_TLS_PSK_MAX_LEN) {
-			SPDK_ERRLOG("Insufficient buffer size for PSK");
-			return -EINVAL;
-		}
-		unhexlified = spdk_unhexlify(ctx->psk_key);
-		if (unhexlified == NULL) {
-			SPDK_ERRLOG("Could not unhexlify PSK");
-			return -EINVAL;
-		}
-		memcpy(psk, unhexlified, impl_opts.psk_key_size);
-		free(unhexlified);
-		impl_opts.psk_key = psk;
-	}
 
 	ctx->sock = spdk_sock_listen_ext(ctx->host, ctx->port, ctx->sock_impl_name, &opts);
 	if (ctx->sock == NULL) {
@@ -463,16 +475,6 @@ hello_sock_listen(struct hello_context_t *ctx)
 	ctx->group = spdk_sock_group_create(NULL);
 	if (ctx->group == NULL) {
 		SPDK_ERRLOG("Cannot create sock group\n");
-		spdk_sock_close(&ctx->sock);
-		return -1;
-	}
-
-	/*
-	 * Provide a buffer to the group to be used with receive.
-	 */
-	ctx->buf = calloc(1, BUFFER_SIZE);
-	if (ctx->buf == NULL) {
-		SPDK_ERRLOG("Cannot allocate memory for sock group\n");
 		spdk_sock_close(&ctx->sock);
 		return -1;
 	}
@@ -544,6 +546,7 @@ main(int argc, char **argv)
 	hello_context.ktls = g_ktls;
 	hello_context.tls_version = g_tls_version;
 	hello_context.psk_key = g_psk_key;
+	hello_context.psk_key_size = g_psk_key_size;
 	hello_context.psk_identity = g_psk_identity;
 	hello_context.verbose = g_verbose;
 
@@ -555,6 +558,13 @@ main(int argc, char **argv)
 			exit(-1);
 		}
 	}
+
+	hello_context.buf = calloc(1, BUFFER_SIZE);
+	if (hello_context.buf == NULL) {
+		SPDK_ERRLOG("Cannot allocate memory for hello_context buffer\n");
+		exit(-1);
+	}
+	hello_context.n = 0;
 
 	if (hello_context.is_server) {
 		struct spdk_sock_impl_opts impl_opts = {};

@@ -6,7 +6,7 @@
 
 #include "spdk/stdinc.h"
 #include "spdk/nvmf_spec.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/bdev_zone.h"
 
 #include "common/lib/test_env.c"
@@ -198,11 +198,6 @@ DEFINE_STUB(spdk_sock_group_get_ctx,
 	    (struct spdk_sock_group *group),
 	    NULL);
 
-DEFINE_STUB(spdk_sock_set_priority,
-	    int,
-	    (struct spdk_sock *sock, int priority),
-	    0);
-
 DEFINE_STUB_V(nvmf_ns_reservation_request, (void *ctx));
 
 DEFINE_STUB_V(spdk_nvme_trid_populate_transport, (struct spdk_nvme_transport_id *trid,
@@ -238,8 +233,9 @@ DEFINE_STUB(spdk_bdev_get_zone_size, uint64_t, (const struct spdk_bdev *bdev), 0
 DEFINE_STUB(spdk_nvme_ns_get_format_index, uint32_t,
 	    (const struct spdk_nvme_ns_data *nsdata), 0);
 
-DEFINE_STUB(spdk_sock_get_default_impl_name, const char *, (void), "");
 DEFINE_STUB(spdk_sock_get_impl_name, const char *, (struct spdk_sock *sock), "");
+
+DEFINE_STUB(spdk_nvmf_subsystem_is_discovery, bool, (struct spdk_nvmf_subsystem *subsystem), false);
 
 struct spdk_io_channel *
 spdk_accel_get_io_channel(void)
@@ -1475,7 +1471,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -1498,9 +1493,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvmf_tcp_tls_generate_retained_psk);
 	CU_ADD_TEST(suite, test_nvmf_tcp_tls_generate_tls_psk);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

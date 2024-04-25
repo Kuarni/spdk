@@ -6,7 +6,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "spdk_internal/mock.h"
 #include "thread/thread_internal.h"
@@ -30,6 +30,16 @@ DEFINE_STUB(spdk_bdev_comparev_blocks, int, (struct spdk_bdev_desc *desc,
 		struct spdk_io_channel *ch, struct iovec *iov, int iovcnt,
 		uint64_t offset_blocks, uint64_t num_blocks,
 		spdk_bdev_io_completion_cb cb, void *cb_arg), 0);
+
+DEFINE_STUB(spdk_bdev_readv_blocks_ext, int, (struct spdk_bdev_desc *desc,
+		struct spdk_io_channel *ch, struct iovec *iov, int iovcnt, uint64_t offset_blocks,
+		uint64_t num_blocks, spdk_bdev_io_completion_cb cb, void *cb_arg,
+		struct spdk_bdev_ext_io_opts *opts), 0);
+
+DEFINE_STUB(spdk_bdev_writev_blocks_ext, int, (struct spdk_bdev_desc *desc,
+		struct spdk_io_channel *ch, struct iovec *iov, int iovcnt, uint64_t offset_blocks,
+		uint64_t num_blocks, spdk_bdev_io_completion_cb cb, void *cb_arg,
+		struct spdk_bdev_ext_io_opts *opts), 0);
 
 DEFINE_STUB(spdk_bdev_nvme_admin_passthru, int,
 	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
@@ -239,7 +249,7 @@ int
 spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_size,
 		  bool md_interleave, bool dif_loc, enum spdk_dif_type dif_type, uint32_t dif_flags,
 		  uint32_t init_ref_tag, uint16_t apptag_mask, uint16_t app_tag,
-		  uint32_t data_offset, uint32_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts)
+		  uint32_t data_offset, uint64_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts)
 {
 	ctx->dif_pi_format = opts->dif_pi_format;
 	ctx->block_size = block_size;
@@ -733,7 +743,6 @@ test_nvmf_bdev_ctrlr_cmd(void)
 	cmd.nvme_cmd.cdw12_bits.copy.nr = 0;
 	range.slba = 512;
 	range.nlb = 511;
-	req.data = &range;
 	req.length = 32;
 	spdk_iov_one(req.iov, &req.iovcnt, &range, req.length);
 	rc = nvmf_bdev_ctrlr_copy_cmd(&bdev, NULL, &ch, &req);
@@ -928,7 +937,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -943,9 +951,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvmf_bdev_ctrlr_read_write_cmd);
 	CU_ADD_TEST(suite, test_nvmf_bdev_ctrlr_nvme_passthru);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

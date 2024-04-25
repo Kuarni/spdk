@@ -48,7 +48,6 @@
 	(1ULL << VIRTIO_F_NOTIFY_ON_EMPTY) | \
 	(1ULL << VIRTIO_RING_F_EVENT_IDX) | \
 	(1ULL << VIRTIO_RING_F_INDIRECT_DESC) | \
-	(1ULL << VIRTIO_F_RING_PACKED) | \
 	(1ULL << VIRTIO_F_ANY_LAYOUT))
 
 #define SPDK_VHOST_DISABLED_FEATURES ((1ULL << VIRTIO_RING_F_EVENT_IDX) | \
@@ -115,13 +114,17 @@ struct spdk_vhost_session {
 	char *name;
 
 	bool started;
+	bool starting;
 	bool interrupt_mode;
+	bool needs_restart;
 
 	struct rte_vhost_memory *mem;
 
 	int task_cnt;
 
 	uint16_t max_queues;
+	/* Maximum number of queues before restart, used with 'needs_restart' flag */
+	uint16_t original_max_queues;
 
 	uint64_t negotiated_features;
 
@@ -178,7 +181,6 @@ struct spdk_vhost_dev {
 	uint64_t virtio_features;
 	uint64_t disabled_features;
 	uint64_t protocol_features;
-	bool packed_ring_recovery;
 
 	const struct spdk_vhost_dev_backend *backend;
 
@@ -399,10 +401,12 @@ vhost_dev_has_feature(struct spdk_vhost_session *vsession, unsigned feature_id)
 	return vsession->negotiated_features & (1ULL << feature_id);
 }
 
+int vhost_scsi_controller_start(const char *name);
+
 int vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *mask_str,
-		       const struct spdk_json_val *params,
-		       const struct spdk_vhost_dev_backend *backend,
-		       const struct spdk_vhost_user_dev_backend *user_backend);
+		       const struct spdk_json_val *params, const struct spdk_vhost_dev_backend *backend,
+		       const struct spdk_vhost_user_dev_backend *user_backend, bool delay);
+
 int vhost_dev_unregister(struct spdk_vhost_dev *vdev);
 
 void vhost_dump_info_json(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
@@ -472,8 +476,12 @@ int vhost_user_session_set_coalescing(struct spdk_vhost_dev *dev,
 				      struct spdk_vhost_session *vsession, void *ctx);
 int vhost_user_dev_set_coalescing(struct spdk_vhost_user_dev *user_dev, uint32_t delay_base_us,
 				  uint32_t iops_threshold);
-int vhost_user_dev_register(struct spdk_vhost_dev *vdev, const char *name,
-			    struct spdk_cpuset *cpumask, const struct spdk_vhost_user_dev_backend *user_backend);
+int vhost_user_dev_create(struct spdk_vhost_dev *vdev, const char *name,
+			  struct spdk_cpuset *cpumask,
+			  const struct spdk_vhost_user_dev_backend *user_backend, bool dealy);
+int vhost_user_dev_init(struct spdk_vhost_dev *vdev, const char *name,
+			struct spdk_cpuset *cpumask, const struct spdk_vhost_user_dev_backend *user_backend);
+int vhost_user_dev_start(struct spdk_vhost_dev *vdev);
 int vhost_user_dev_unregister(struct spdk_vhost_dev *vdev);
 int vhost_user_init(void);
 void vhost_user_fini(spdk_vhost_fini_cb vhost_cb);

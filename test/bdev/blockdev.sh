@@ -9,12 +9,6 @@ rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
 source $testdir/nbd_common.sh
 
-# nullglob will remove unmatched words containing '*', '?', '[' characters during word splitting.
-# This means that empty alias arrays will be removed instead of printing "[]", which breaks
-# consecutive "jq" calls, as the "aliases" key will have no value and the whole JSON will be
-# invalid. Hence do not enable this option for the duration of the tests in this script.
-shopt -s extglob
-
 rpc_py=rpc_cmd
 conf_file="$testdir/bdev.json"
 nonenclosed_conf_file="$testdir/nonenclosed.json"
@@ -55,6 +49,8 @@ function start_spdk_tgt() {
 
 function setup_bdev_conf() {
 	"$rpc_py" <<- RPC
+		iobuf_set_options --small-pool-count 10000 --large-pool-count 1100
+		framework_start_init
 		bdev_split_create Malloc1 2
 		bdev_split_create -s 4 Malloc2 8
 		bdev_malloc_create -b Malloc0 32 512
@@ -65,9 +61,12 @@ function setup_bdev_conf() {
 		bdev_malloc_create -b Malloc5 32 512
 		bdev_malloc_create -b Malloc6 32 512
 		bdev_malloc_create -b Malloc7 32 512
+		bdev_malloc_create -b Malloc8 32 512
+		bdev_malloc_create -b Malloc9 32 512
 		bdev_passthru_create -p TestPT -b Malloc3
 		bdev_raid_create -n raid0 -z 64 -r 0 -b "Malloc4 Malloc5"
 		bdev_raid_create -n concat0 -z 64 -r concat -b "Malloc6 Malloc7"
+		bdev_raid_create -n raid1 -r 1 -b "Malloc8 Malloc9"
 		bdev_set_qos_limit --rw_mbytes_per_sec 100 Malloc3
 		bdev_set_qos_limit --rw_ios_per_sec 20000 Malloc0
 	RPC
@@ -337,7 +336,7 @@ function fio_test_suite() {
 	# Generate the fio config file given the list of all unclaimed bdevs
 	env_context=$(echo "$env_ctx" | sed 's/--env-context=//')
 	fio_config_gen $testdir/bdev.fio verify AIO "$env_context"
-	for b in $(echo $bdevs | jq -r '.name'); do
+	for b in "${bdevs_name[@]}"; do
 		echo "[job_$b]" >> $testdir/bdev.fio
 		echo "filename=$b" >> $testdir/bdev.fio
 	done
@@ -351,8 +350,8 @@ function fio_test_suite() {
 
 	# Generate the fio config file given the list of all unclaimed bdevs that support unmap
 	fio_config_gen $testdir/bdev.fio trim "" "$env_context"
-	if [ "$(echo $bdevs | jq -r 'select(.supported_io_types.unmap == true) | .name')" != "" ]; then
-		for b in $(echo $bdevs | jq -r 'select(.supported_io_types.unmap == true) | .name'); do
+	if [[ -n $(printf '%s\n' "${bdevs[@]}" | jq -r 'select(.supported_io_types.unmap == true) | .name') ]]; then
+		for b in $(printf '%s\n' "${bdevs[@]}" | jq -r 'select(.supported_io_types.unmap == true) | .name'); do
 			echo "[job_$b]" >> $testdir/bdev.fio
 			echo "filename=$b" >> $testdir/bdev.fio
 		done
@@ -630,6 +629,40 @@ function bdev_gpt_uuid() {
 	killprocess "$spdk_tgt_pid"
 }
 
+function bdev_crypto_enomem() {
+	local base_dev="base0"
+	local test_dev="crypt0"
+	local err_dev="EE_$base_dev"
+	local qd=32
+
+	"$rootdir/build/examples/bdevperf" -z -m 0x2 -q $qd -o 4096 -w randwrite -t 5 -f "$env_ctx" &
+	ERR_PID=$!
+	trap 'cleanup; killprocess $ERR_PID; exit 1' SIGINT SIGTERM EXIT
+	waitforlisten $ERR_PID
+
+	$rpc_py <<- RPC
+		accel_crypto_key_create -c AES_XTS -k 00112233445566778899001122334455 -e 11223344556677889900112233445500 -n test_dek_sw
+		bdev_null_create $base_dev 1024 512
+		bdev_error_create $base_dev
+		bdev_crypto_create $err_dev $test_dev -n test_dek_sw
+	RPC
+
+	waitforbdev $test_dev
+
+	$rootdir/examples/bdev/bdevperf/bdevperf.py perform_tests &
+	rpcpid=$!
+
+	sleep 1
+	$rpc_py bdev_error_inject_error $err_dev -n 5 -q $((qd - 1)) write nomem
+
+	wait $rpcpid
+
+	$rpc_py bdev_crypto_delete $test_dev
+
+	killprocess $ERR_PID
+	trap - SIGINT SIGTERM EXIT
+}
+
 # Initial bdev creation and configuration
 #-----------------------------------------------------
 QOS_DEV_1="Malloc_0"
@@ -652,7 +685,7 @@ wait_for_rpc=""
 if [ -n "$crypto_device" ]; then
 	env_ctx="--env-context=--allow=$crypto_device,class=crypto"
 fi
-if [[ $test_type == crypto_* ]]; then
+if [[ $test_type == bdev || $test_type == crypto_* ]]; then
 	wait_for_rpc="--wait-for-rpc"
 fi
 start_spdk_tgt
@@ -705,13 +738,14 @@ esac
 cat <<- CONF > "$conf_file"
 	        {"subsystems":[
 	        $("$rpc_py" save_subsystem_config -n accel),
-	        $("$rpc_py" save_subsystem_config -n bdev)
+	        $("$rpc_py" save_subsystem_config -n bdev),
+	        $("$rpc_py" save_subsystem_config -n iobuf)
 	        ]}
 CONF
 
-bdevs=$("$rpc_py" bdev_get_bdevs | jq -r '.[] | select(.claimed == false)')
-bdevs_name=$(echo $bdevs | jq -r '.name')
-bdev_list=($bdevs_name)
+mapfile -t bdevs < <("$rpc_py" bdev_get_bdevs | jq -r '.[] | select(.claimed == false)')
+mapfile -t bdevs_name < <(printf '%s\n' "${bdevs[@]}" | jq -r '.name')
+bdev_list=("${bdevs_name[@]}")
 
 hello_world_bdev=${bdev_list[0]}
 trap - SIGINT SIGTERM EXIT
@@ -723,7 +757,7 @@ trap "cleanup" SIGINT SIGTERM EXIT
 
 run_test "bdev_hello_world" $SPDK_EXAMPLE_DIR/hello_bdev --json "$conf_file" -b "$hello_world_bdev" "$env_ctx"
 run_test "bdev_bounds" bdev_bounds "$env_ctx"
-run_test "bdev_nbd" nbd_function_test $conf_file "$bdevs_name" "$env_ctx"
+run_test "bdev_nbd" nbd_function_test "$conf_file" "${bdevs_name[*]}" "$env_ctx"
 if [[ $CONFIG_FIO_PLUGIN == y ]]; then
 	if [ "$test_type" = "nvme" ] || [ "$test_type" = "gpt" ]; then
 		# TODO: once we get real multi-ns drives, re-enable this test for NVMe.
@@ -757,6 +791,10 @@ fi
 
 if [[ $test_type == gpt ]]; then
 	run_test "bdev_gpt_uuid" bdev_gpt_uuid
+fi
+
+if [[ $test_type == crypto_sw ]]; then
+	run_test "bdev_crypto_enomem" bdev_crypto_enomem
 fi
 
 # Temporarily disabled - infinite loop

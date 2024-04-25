@@ -65,6 +65,7 @@ struct spdk_nvmf_tgt {
 
 	TAILQ_HEAD(, spdk_nvmf_transport)	transports;
 	TAILQ_HEAD(, spdk_nvmf_poll_group)	poll_groups;
+	TAILQ_HEAD(, spdk_nvmf_referral)	referrals;
 
 	/* Used for round-robin assignment of connections to poll groups */
 	struct spdk_nvmf_poll_group		*next_poll_group;
@@ -92,7 +93,16 @@ struct spdk_nvmf_subsystem_listener {
 	enum spdk_nvme_ana_state			*ana_state;
 	uint64_t					ana_state_change_count;
 	uint16_t					id;
+	struct spdk_nvmf_listener_opts			opts;
 	TAILQ_ENTRY(spdk_nvmf_subsystem_listener)	link;
+};
+
+struct spdk_nvmf_referral {
+	/* Discovery Log Page Entry for this referral */
+	struct spdk_nvmf_discovery_log_page_entry entry;
+	/* Transport ID */
+	struct spdk_nvme_transport_id trid;
+	TAILQ_ENTRY(spdk_nvmf_referral) link;
 };
 
 /* Maximum number of registrants supported per namespace */
@@ -396,8 +406,8 @@ struct spdk_nvmf_listener *nvmf_transport_find_listener(
 	const struct spdk_nvme_transport_id *trid);
 void nvmf_transport_dump_opts(struct spdk_nvmf_transport *transport, struct spdk_json_write_ctx *w,
 			      bool named);
-void nvmf_transport_listen_dump_opts(struct spdk_nvmf_transport *transport,
-				     const struct spdk_nvme_transport_id *trid, struct spdk_json_write_ctx *w);
+void nvmf_transport_listen_dump_trid(const struct spdk_nvme_transport_id *trid,
+				     struct spdk_json_write_ctx *w);
 void nvmf_subsystem_set_ana_state(struct spdk_nvmf_subsystem *subsystem,
 				  const struct spdk_nvme_transport_id *trid,
 				  enum spdk_nvme_ana_state ana_state, uint32_t anagrpid,

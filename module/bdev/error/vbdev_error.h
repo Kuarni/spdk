@@ -14,6 +14,7 @@ enum vbdev_error_type {
 	VBDEV_IO_FAILURE = 1,
 	VBDEV_IO_PENDING,
 	VBDEV_IO_CORRUPT_DATA,
+	VBDEV_IO_NOMEM,
 };
 
 typedef void (*spdk_delete_error_complete)(void *cb_arg, int bdeverrno);
@@ -41,6 +42,7 @@ struct vbdev_error_inject_opts {
 	uint32_t io_type;
 	uint32_t error_type;
 	uint32_t error_num;
+	uint64_t error_qd;
 	uint64_t corrupt_offset;
 	uint8_t corrupt_value;
 };

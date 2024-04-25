@@ -129,8 +129,13 @@ function check_c_style() {
 
 	if hash astyle; then
 		echo -n "Checking coding style..."
-		if [ "$(astyle -V)" \< "Artistic Style Version 3" ]; then
-			echo -n " Your astyle version is too old so skipping coding style checks. Please update astyle to at least 3.0.1 version..."
+		version=$(astyle --version | awk '{print $NF}')
+		if lt "$version" 3.0.1; then
+			echo " Your astyle version is too old so skipping coding style checks. Please update astyle to at least 3.0.1 version..."
+			rc=1
+		elif ge "$version" 3.4; then
+			echo " Your astyle version is too new so skipping coding style checks. Please use astyle version < 3.4"
+			rc=1
 		else
 			rm -f astyle.log
 			touch astyle.log
@@ -242,7 +247,7 @@ function check_cunit_style() {
 
 	echo -n "Checking for use of forbidden CUnit macros..."
 
-	git grep --line-number -w 'CU_ASSERT_FATAL' -- 'test/*' ':!test/spdk_cunit.h' > badcunit.log || true
+	git grep --line-number -w 'CU_ASSERT_FATAL' -- 'test/*' ':!include/spdk_internal/cunit.h' > badcunit.log || true
 	if [ -s badcunit.log ]; then
 		echo " Forbidden CU_ASSERT_FATAL usage detected - use SPDK_CU_ASSERT_FATAL instead"
 		cat badcunit.log
@@ -292,7 +297,7 @@ function check_posix_includes() {
 	return $rc
 }
 
-function check_naming_conventions() {
+check_function_conventions() {
 	local rc=0
 
 	echo -n "Checking for proper function naming conventions..."
@@ -363,6 +368,45 @@ function check_naming_conventions() {
 	fi
 
 	return $rc
+}
+
+check_conventions_generic() {
+	local out decltype=$1 excludes=(${@:2})
+
+	# We only care about the types defined at the beginning of a line to allow stuff like nested
+	# structs.  Also, we need to drop any __attribute__ declarations.
+	out=$(git grep -E "^$decltype\s+\w+.*\{$" -- "include/spdk" "${excludes[@]}" \
+		| sed 's/__attribute__\s*(([[:alnum:]_, ()]*))\s*//g' \
+		| awk "!/$decltype\s+spdk_/ { \$(NF--)=\"\"; print }")
+
+	if [[ -n "$out" ]]; then
+		cat <<- WARN
+			Found $decltype declarations without the spdk_ prefix:
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
+check_naming_conventions() {
+	check_function_conventions
+	# There are still some enums without the spdk_ prefix.  Once they're renamed, we can remove
+	# these excludes
+	check_conventions_generic 'enum' \
+		':!include/spdk/blob.h' \
+		':!include/spdk/ftl.h' \
+		':!include/spdk/idxd_spec.h' \
+		':!include/spdk/iscsi_spec.h' \
+		':!include/spdk/lvol.h' \
+		':!include/spdk/nvmf_fc_spec.h' \
+		':!include/spdk/vfio_user_spec.h'
+	# Same with structs
+	check_conventions_generic 'struct' \
+		':!include/spdk/ftl.h' \
+		':!include/spdk/idxd_spec.h' \
+		':!include/spdk/iscsi_spec.h' \
+		':!include/spdk/vfio_user_spec.h'
 }
 
 function check_include_style() {
@@ -450,6 +494,28 @@ function check_python_style() {
 	return $rc
 }
 
+function check_golang_style() {
+	local rc=0 out
+
+	if hash golangci-lint 2> /dev/null; then
+		echo -n "Checking Golang style..."
+		out=$(find "$rootdir/go" -name go.mod -execdir go fmt \; -execdir golangci-lint run \; 2>&1)
+		if [[ -n "$out" ]]; then
+			cat <<- WARN
+				Golang formatting errors detected:
+				echo "$out"
+			WARN
+
+			return 1
+		else
+			echo "OK"
+		fi
+	else
+		echo "You do not have golangci-lint installed, so Golang style will not be checked!"
+	fi
+	return 0
+}
+
 function get_bash_files() {
 	local sh shebang
 
@@ -497,24 +563,33 @@ function check_bash_style() {
 			if ! SHFMT_NO_EDITORCONFIG=true "$shfmt" "${shfmt_cmdline[@]}" "${sh_files[@]}" > "$diff"; then
 				# In case shfmt detects an actual syntax error it will write out a proper message on
 				# its stderr, hence the diff file should remain empty.
-				if [[ -s $diff ]]; then
-					diff_out=$(< "$diff")
-				fi
-
-				cat <<- ERROR_SHFMT
-
-					* Errors in style formatting have been detected.
-					${diff_out:+* Please, review the generated patch at $diff
-
-					# _START_OF_THE_DIFF
-
-					${diff_out:-ERROR}
-
-					# _END_OF_THE_DIFF
-					}
-
-				ERROR_SHFMT
 				rc=1
+				if [[ -s $diff ]]; then
+					if patch --merge -p0 < "$diff"; then
+						diff_out=$(git diff)
+
+						if [[ -n $diff_out ]]; then
+							cat <<- ERROR_SHFMT
+
+								* Errors in style formatting have been detected.
+								  Please, review the generated patch at $diff
+
+								# _START_OF_THE_DIFF
+
+								$diff_out
+
+								# _END_OF_THE_DIFF
+
+							ERROR_SHFMT
+						else
+							# Empty diff? This likely means that we reverted to a clean state
+							printf '* Patch reverted, please review your changes and %s\n' "$diff"
+						fi
+					else
+						printf '* Failed to apply %s\n' "$diff"
+
+					fi
+				fi
 			else
 				rm -f "$diff"
 				printf ' OK\n'
@@ -522,6 +597,16 @@ function check_bash_style() {
 		fi
 	else
 		echo "Supported version of shfmt not detected, Bash style formatting check is skipped"
+	fi
+
+	# Cleanup potential .orig files that shfmt creates
+	local orig_f
+
+	mapfile -t orig_f < <(git diff --name-only)
+	orig_f=("${orig_f[@]/%/.orig}")
+
+	if ((${#orig_f[@]} > 0)); then
+		git clean -f "${orig_f[@]}"
 	fi
 
 	return $rc
@@ -833,5 +918,6 @@ check_changelog || rc=1
 check_json_rpc || rc=1
 check_rpc_args || rc=1
 check_spdx_lic || rc=1
+check_golang_style || rc=1
 
 exit $rc

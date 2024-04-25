@@ -7,7 +7,7 @@
 #include "spdk/stdinc.h"
 
 #include "CUnit/Basic.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/thread.h"
 #include "spdk_internal/mock.h"
 #include "common/lib/ut_multithread.c"
@@ -24,7 +24,11 @@ DEFINE_STUB(rte_vhost_get_vring_base, int, (int vid, uint16_t queue_id,
 		uint16_t *last_avail_idx, uint16_t *last_used_idx), 0);
 DEFINE_STUB(spdk_mem_register, int, (void *vaddr, size_t len), 0);
 DEFINE_STUB(spdk_mem_unregister, int, (void *vaddr, size_t len), 0);
+#if RTE_VERSION < RTE_VERSION_NUM(22, 11, 0, 0)
 DEFINE_STUB(rte_vhost_vring_call, int, (int vid, uint16_t vring_idx), 0);
+#else
+DEFINE_STUB(rte_vhost_vring_call_nonblock, int, (int vid, uint16_t vring_idx), 0);
+#endif
 DEFINE_STUB_V(rte_vhost_log_used_vring, (int vid, uint16_t vring_idx,
 		uint64_t offset, uint64_t len));
 
@@ -36,13 +40,8 @@ DEFINE_STUB(rte_vhost_enable_guest_notification, int,
 	    (int vid, uint16_t queue_id, int enable), 0);
 DEFINE_STUB(rte_vhost_get_ifname, int, (int vid, char *buf, size_t len), 0);
 DEFINE_STUB(rte_vhost_driver_start, int, (const char *name), 0);
-#if RTE_VERSION >= RTE_VERSION_NUM(21, 11, 0, 0)
 DEFINE_STUB(rte_vhost_driver_callback_register, int,
 	    (const char *path, struct rte_vhost_device_ops const *const ops), 0);
-#else
-DEFINE_STUB(rte_vhost_driver_callback_register, int,
-	    (const char *path, struct vhost_device_ops const *const ops), 0);
-#endif
 DEFINE_STUB(rte_vhost_driver_disable_features, int, (const char *path, uint64_t features), 0);
 DEFINE_STUB(rte_vhost_driver_set_features, int, (const char *path, uint64_t features), 0);
 DEFINE_STUB(rte_vhost_driver_register, int, (const char *path, uint64_t flags), 0);
@@ -67,6 +66,7 @@ DEFINE_STUB(rte_vhost_get_vring_base_from_inflight, int,
 	    (int vid, uint16_t queue_id, uint16_t *last_avail_idx, uint16_t *last_used_idx), 0);
 DEFINE_STUB(rte_vhost_extern_callback_register, int,
 	    (int vid, struct rte_vhost_user_extern_ops const *const ops, void *ctx), 0);
+DEFINE_STUB(spdk_iommu_is_enabled, bool, (void), 0);
 
 /* rte_vhost_user.c shutdowns vhost_user sessions in a separate pthread */
 DECLARE_WRAPPER(pthread_create, int, (pthread_t *thread, const pthread_attr_t *attr,
@@ -209,7 +209,7 @@ alloc_vdev(struct spdk_vhost_dev **vdev_p, const char *name, const char *cpumask
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(vdev != NULL);
 	memset(vdev, 0, sizeof(*vdev));
-	rc = vhost_dev_register(vdev, name, cpumask, NULL, &g_vdev_backend, &g_vdev_user_backend);
+	rc = vhost_dev_register(vdev, name, cpumask, NULL, &g_vdev_backend, &g_vdev_user_backend, false);
 	if (rc == 0) {
 		*vdev_p = vdev;
 	} else {
@@ -684,7 +684,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("vhost_suite", test_setup, test_cleanup);
@@ -697,9 +696,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, vq_packed_ring_test);
 	CU_ADD_TEST(suite, vhost_blk_construct_test);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	return num_failures;

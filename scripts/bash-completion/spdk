@@ -31,7 +31,7 @@ _get_default_rpc_methods() {
 		# Each method name seems to be prefixed with 20h x 4. Then it can
 		# be followed with list of aliases enclosed inside (). Example:
 		#    ioat_scan_accel_module
-		[[ $REPLY =~ ^\ {4}([a-z]+(_[a-z]+)*)(\ *\((.+)\))? ]] || continue
+		[[ $REPLY =~ ^\ {4}([a-z0-9]+(_[a-z0-9]+)*)(\ *\((.+)\))? ]] || continue
 
 		names=("${BASH_REMATCH[1]}")
 		if [[ $SPDK_RPC_ALIASES == yes ]] && [[ -n ${BASH_REMATCH[4]} ]]; then
@@ -238,6 +238,15 @@ _spdk_app() {
 	fi
 }
 
+_setup() {
+	local cur prev
+
+	_init_completion || return
+	_is_app "$1" || return
+
+	COMPREPLY=($(compgen -W 'cleanup config help interactive reset status' -- "$cur"))
+}
+
 # Build simple completion for some common spdk apps|tools
 _spdk_apps() {
 	local apps
@@ -254,10 +263,12 @@ _spdk_apps() {
 		pkgdep.sh
 		run-autorun.sh
 		vm_setup.sh
+		autotest_setup.sh
 	) # TODO: Add more?
 
 	complete -o default -F _spdk_app "${apps[@]}"
 	complete -o default -F _rpc rpc.py
+	complete -o default -F _setup setup.sh
 }
 
 _spdk_apps

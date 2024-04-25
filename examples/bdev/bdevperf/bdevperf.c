@@ -24,6 +24,7 @@
 #define BDEVPERF_CONFIG_MAX_FILENAME 1024
 #define BDEVPERF_CONFIG_UNDEFINED -1
 #define BDEVPERF_CONFIG_ERROR -2
+#define PATTERN_TYPES_STR "(read, write, randread, randwrite, rw, randrw, verify, reset, unmap, flush, write_zeroes)"
 
 struct bdevperf_task {
 	struct iovec			iov;
@@ -100,6 +101,9 @@ static const double g_latency_cutoffs[] = {
 	0.9999999,
 	-1,
 };
+
+static const char *g_rpc_log_file_name = NULL;
+static FILE *g_rpc_log_file = NULL;
 
 struct latency_info {
 	uint64_t	min;
@@ -622,6 +626,10 @@ clean:
 			spdk_thread_send_msg(lthread->thread, job_thread_exit, NULL);
 			free(lthread);
 		}
+	}
+
+	if (g_bdevperf_conf == NULL) {
+		free_job_config();
 	}
 
 	rc = g_run_rc;
@@ -1847,7 +1855,7 @@ parse_rw(const char *str, enum job_config_rw ret)
 		ret = JOB_CONFIG_RW_RANDRW;
 	} else {
 		fprintf(stderr, "rw must be one of\n"
-			"(read, write, randread, randwrite, rw, randrw, verify, reset, unmap, flush)\n");
+			PATTERN_TYPES_STR "\n");
 		ret = BDEVPERF_CONFIG_ERROR;
 	}
 
@@ -1900,6 +1908,27 @@ get_lcore_thread(uint32_t lcore)
 }
 
 static void
+create_lcore_thread(uint32_t lcore)
+{
+	struct lcore_thread *lthread;
+	struct spdk_cpuset cpumask = {};
+	char name[32];
+
+	lthread = calloc(1, sizeof(*lthread));
+	assert(lthread != NULL);
+
+	lthread->lcore = lcore;
+
+	snprintf(name, sizeof(name), "lcore_%u", lcore);
+	spdk_cpuset_set_cpu(&cpumask, lcore, true);
+
+	lthread->thread = spdk_thread_create(name, &cpumask);
+	assert(lthread->thread != NULL);
+
+	TAILQ_INSERT_TAIL(&g_lcore_thread_list, lthread, link);
+}
+
+static void
 bdevperf_construct_jobs(void)
 {
 	char filename[BDEVPERF_CONFIG_MAX_FILENAME];
@@ -1907,7 +1936,14 @@ bdevperf_construct_jobs(void)
 	struct job_config *config;
 	struct spdk_bdev *bdev;
 	const char *filenames;
+	uint32_t i;
 	int rc;
+
+	if (g_one_thread_per_lcore) {
+		SPDK_ENV_FOREACH_CORE(i) {
+			create_lcore_thread(i);
+		}
+	}
 
 	TAILQ_FOREACH(config, &job_config_list, link) {
 		filenames = config->filename;
@@ -2033,31 +2069,9 @@ bdevperf_construct_job_config(void *ctx, struct spdk_bdev *bdev)
 }
 
 static void
-create_lcore_thread(uint32_t lcore)
-{
-	struct lcore_thread *lthread;
-	struct spdk_cpuset cpumask = {};
-	char name[32];
-
-	lthread = calloc(1, sizeof(*lthread));
-	assert(lthread != NULL);
-
-	lthread->lcore = lcore;
-
-	snprintf(name, sizeof(name), "lcore_%u", lcore);
-	spdk_cpuset_set_cpu(&cpumask, lcore, true);
-
-	lthread->thread = spdk_thread_create(name, &cpumask);
-	assert(lthread->thread != NULL);
-
-	TAILQ_INSERT_TAIL(&g_lcore_thread_list, lthread, link);
-}
-
-static void
 bdevperf_construct_job_configs(void)
 {
 	struct spdk_bdev *bdev;
-	uint32_t i;
 
 	/* There are three different modes for allocating jobs. Standard mode
 	 * (the default) creates one spdk_thread per bdev and runs the I/O job there.
@@ -2078,12 +2092,6 @@ bdevperf_construct_job_configs(void)
 
 	if (g_bdevperf_conf) {
 		goto end;
-	}
-
-	if (g_one_thread_per_lcore) {
-		SPDK_ENV_FOREACH_CORE(i) {
-			create_lcore_thread(i);
-		}
 	}
 
 	if (g_multithread_mode) {
@@ -2175,7 +2183,7 @@ read_job_config(void)
 	struct job_config global_default_config;
 	struct job_config global_config;
 	struct spdk_conf_section *s;
-	struct job_config *config;
+	struct job_config *config = NULL;
 	const char *cpumask;
 	const char *rw;
 	bool is_global;
@@ -2316,9 +2324,18 @@ read_job_config(void)
 			config_set_cli_args(config);
 			global_config = *config;
 			free(config);
+			config = NULL;
 		} else {
 			TAILQ_INSERT_TAIL(&job_config_list, config, link);
 			n++;
+		}
+	}
+
+	if (g_rpc_log_file_name != NULL) {
+		g_rpc_log_file = fopen(g_rpc_log_file_name, "a");
+		if (g_rpc_log_file == NULL) {
+			fprintf(stderr, "Failed to open %s\n", g_rpc_log_file_name);
+			goto error;
 		}
 	}
 
@@ -2466,6 +2483,8 @@ bdevperf_parse_arg(int ch, char *arg)
 		g_random_map = true;
 	} else if (ch == 'E') {
 		g_one_thread_per_lcore = true;
+	} else if (ch == 'J') {
+		g_rpc_log_file_name = optarg;
 	} else {
 		tmp = spdk_strtoll(optarg, 10);
 		if (tmp < 0) {
@@ -2512,7 +2531,7 @@ bdevperf_usage(void)
 {
 	printf(" -q <depth>                io depth\n");
 	printf(" -o <size>                 io size in bytes\n");
-	printf(" -w <type>                 io pattern type, must be one of (read, write, randread, randwrite, rw, randrw, verify, reset, unmap, flush)\n");
+	printf(" -w <type>                 io pattern type, must be one of " PATTERN_TYPES_STR "\n");
 	printf(" -t <time>                 time in seconds\n");
 	printf(" -k <timeout>              timeout in seconds to detect starved I/O (default is 0 and disabled)\n");
 	printf(" -M <percent>              rwmixread (100 for reads, 0 for writes)\n");
@@ -2532,6 +2551,18 @@ bdevperf_usage(void)
 	printf(" -l                        display latency histogram, default: disable. -l display summary, -ll display details\n");
 	printf(" -D                        use a random map for picking offsets not previously read or written (for all jobs)\n");
 	printf(" -E                        share per lcore thread among jobs. Available only if -j is not used.\n");
+	printf(" -J                        File name to open with append mode and log JSON RPC calls.\n");
+}
+
+static void
+bdevperf_fini(void)
+{
+	free_job_config();
+
+	if (g_rpc_log_file != NULL) {
+		fclose(g_rpc_log_file);
+		g_rpc_log_file = NULL;
+	}
 }
 
 static int
@@ -2542,6 +2573,10 @@ verify_test_params(struct spdk_app_opts *opts)
 	 * use the default address. */
 	if (g_wait_for_tests && opts->rpc_addr == NULL) {
 		opts->rpc_addr = SPDK_DEFAULT_RPC_ADDR;
+	}
+
+	if (g_rpc_log_file != NULL) {
+		opts->rpc_log_file = g_rpc_log_file;
 	}
 
 	if (!g_bdevperf_conf_file && g_queue_depth <= 0) {
@@ -2658,25 +2693,25 @@ main(int argc, char **argv)
 	opts.rpc_addr = NULL;
 	opts.shutdown_cb = spdk_bdevperf_shutdown_cb;
 
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "Zzfq:o:t:w:k:CEF:M:P:S:T:Xlj:D", NULL,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "Zzfq:o:t:w:k:CEF:J:M:P:S:T:Xlj:D", NULL,
 				      bdevperf_parse_arg, bdevperf_usage)) !=
 	    SPDK_APP_PARSE_ARGS_SUCCESS) {
 		return rc;
 	}
 
 	if (read_job_config()) {
-		free_job_config();
+		bdevperf_fini();
 		return 1;
 	}
 
 	if (verify_test_params(&opts) != 0) {
-		free_job_config();
+		bdevperf_fini();
 		exit(1);
 	}
 
 	rc = spdk_app_start(&opts, bdevperf_run, NULL);
 
 	spdk_app_fini();
-	free_job_config();
+	bdevperf_fini();
 	return rc;
 }

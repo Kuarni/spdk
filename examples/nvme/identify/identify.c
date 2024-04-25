@@ -18,6 +18,7 @@
 #include "spdk/string.h"
 #include "spdk/util.h"
 #include "spdk/uuid.h"
+#include "spdk/sock.h"
 
 #define MAX_DISCOVERY_LOG_ENTRIES	((uint64_t)1000)
 
@@ -103,6 +104,8 @@ static bool g_vmd = false;
 static bool g_ocssd_verbose = false;
 
 static struct spdk_nvme_detach_ctx *g_detach_ctx = NULL;
+
+static const char *g_iova_mode;
 
 static void
 hex_dump(const void *data, size_t size)
@@ -1591,8 +1594,6 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	const struct spdk_nvme_ctrlr_data	*cdata;
 	union spdk_nvme_cap_register		cap;
 	union spdk_nvme_vs_register		vs;
-	union spdk_nvme_cmbsz_register		cmbsz;
-	union spdk_nvme_pmrcap_register		pmrcap;
 	uint8_t					str[512];
 	uint32_t				i, j;
 	struct spdk_nvme_error_information_entry *error_entry;
@@ -1600,7 +1601,6 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	struct spdk_pci_device			*pci_dev;
 	struct spdk_pci_id			pci_id;
 	uint32_t				nsid;
-	uint64_t				pmrsz;
 	uint8_t					*orig_desc;
 	struct spdk_nvme_ana_group_descriptor	*copied_desc;
 	uint32_t				desc_size, copy_len;
@@ -1608,9 +1608,6 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 
 	cap = spdk_nvme_ctrlr_get_regs_cap(ctrlr);
 	vs = spdk_nvme_ctrlr_get_regs_vs(ctrlr);
-	cmbsz = spdk_nvme_ctrlr_get_regs_cmbsz(ctrlr);
-	pmrcap = spdk_nvme_ctrlr_get_regs_pmrcap(ctrlr);
-	pmrsz = spdk_nvme_ctrlr_get_pmrsz(ctrlr);
 
 	if (!spdk_nvme_ctrlr_is_discovery(ctrlr)) {
 		/*
@@ -1777,8 +1774,12 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 
 	printf("Controller Memory Buffer Support\n");
 	printf("================================\n");
-	if (cmbsz.raw != 0) {
-		uint64_t size = cmbsz.bits.sz;
+	if (cap.bits.cmbs != 0) {
+		union spdk_nvme_cmbsz_register		cmbsz;
+		uint64_t size;
+
+		cmbsz = spdk_nvme_ctrlr_get_regs_cmbsz(ctrlr);
+		size = cmbsz.bits.sz;
 
 		/* Convert the size to bytes by multiplying by the granularity.
 		   By spec, szu is at most 6 and sz is 20 bits, so size requires
@@ -1803,6 +1804,12 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	printf("Persistent Memory Region Support\n");
 	printf("================================\n");
 	if (cap.bits.pmrs != 0) {
+		union spdk_nvme_pmrcap_register		pmrcap;
+		uint64_t				pmrsz;
+
+		pmrcap = spdk_nvme_ctrlr_get_regs_pmrcap(ctrlr);
+		pmrsz = spdk_nvme_ctrlr_get_pmrsz(ctrlr);
+
 		printf("Supported:                             Yes\n");
 		printf("Total Size:                            %" PRIu64 " bytes\n", pmrsz);
 		printf("Read data and metadata in PMR          %s\n",
@@ -2530,9 +2537,15 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 			       entry->adrfam, spdk_nvme_transport_id_adrfam_str(entry->adrfam));
 			printf("Subsystem Type:                        %u (%s)\n",
 			       entry->subtype,
-			       entry->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY ? "Discovery Service" :
+			       entry->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY ? "Referral to a discovery service" :
 			       entry->subtype == SPDK_NVMF_SUBTYPE_NVME ? "NVM Subsystem" :
+			       entry->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY_CURRENT ? "Current Discovery Subsystem" :
 			       "Unknown");
+			printf("Entry Flags:\n");
+			printf("  Duplicate Returned Information:			%u\n",
+			       !!(entry->eflags & SPDK_NVMF_DISCOVERY_LOG_EFLAGS_DUPRETINFO));
+			printf("  Explicit Persistent Connection Support for Discovery: %u\n",
+			       !!(entry->eflags & SPDK_NVMF_DISCOVERY_LOG_EFLAGS_EPCSD));
 			printf("Transport Requirements:\n");
 			printf("  Secure Channel:                      %s\n",
 			       entry->treq.secure_channel == SPDK_NVMF_TREQ_SECURE_CHANNEL_NOT_SPECIFIED ? "Not Specified" :
@@ -2605,9 +2618,11 @@ usage(const char *program_name)
 	printf(" -p         core number in decimal to run this application which started from 0\n");
 	printf(" -d         DPDK huge memory size in MB\n");
 	printf(" -g         use single file descriptor for DPDK memory segments\n");
+	printf(" -v         IOVA mode ('pa' or 'va')\n");
 	printf(" -x         print hex dump of raw data\n");
 	printf(" -z         For NVMe Zoned Namespaces, dump the full zone report (-z) or the first N entries (-z N)\n");
 	printf(" -V         enumerate VMD\n");
+	printf(" -S         socket implementation, e.g. -S uring (default is posix)\n");
 	printf(" -H         show this usage\n");
 }
 
@@ -2620,7 +2635,7 @@ parse_args(int argc, char **argv)
 	spdk_nvme_trid_populate_transport(&g_trid, SPDK_NVME_TRANSPORT_PCIE);
 	snprintf(g_trid.subnqn, sizeof(g_trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
 
-	while ((op = getopt(argc, argv, "d:gi:op:r:xz::HL:V")) != -1) {
+	while ((op = getopt(argc, argv, "d:gi:op:r:v:xz::HL:S:V")) != -1) {
 		switch (op) {
 		case 'd':
 			g_dpdk_mem = spdk_strtol(optarg, 10);
@@ -2673,6 +2688,9 @@ parse_args(int argc, char **argv)
 				g_hostnqn[len] = '\0';
 			}
 			break;
+		case 'v':
+			g_iova_mode = optarg;
+			break;
 		case 'x':
 			g_hex_dump = true;
 			break;
@@ -2706,6 +2724,13 @@ parse_args(int argc, char **argv)
 			exit(EXIT_SUCCESS);
 		case 'V':
 			g_vmd = true;
+			break;
+		case 'S':
+			rc = spdk_sock_set_default_impl(optarg);
+			if (rc < 0) {
+				fprintf(stderr, "Invalid socket implementation\n");
+				exit(EXIT_FAILURE);
+			}
 			break;
 		default:
 			usage(argv[0]);
@@ -2753,6 +2778,7 @@ main(int argc, char **argv)
 	opts.main_core = g_main_core;
 	opts.core_mask = g_core_mask;
 	opts.hugepage_single_segments = g_dpdk_mem_single_seg;
+	opts.iova_mode = g_iova_mode;
 	if (g_trid.trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		opts.no_pci = true;
 	}

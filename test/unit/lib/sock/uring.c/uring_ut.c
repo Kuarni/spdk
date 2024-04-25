@@ -8,7 +8,7 @@
 
 #include "spdk_internal/mock.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/test_env.c"
 #include "sock/uring/uring.c"
@@ -23,9 +23,6 @@ DEFINE_STUB_V(spdk_sock_map_cleanup, (struct spdk_sock_map *map));
 
 DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl, int priority));
 DEFINE_STUB(spdk_sock_close, int, (struct spdk_sock **s), 0);
-DEFINE_STUB(__io_uring_get_cqe, int, (struct io_uring *ring, struct io_uring_cqe **cqe_ptr,
-				      unsigned submit,
-				      unsigned wait_nr, sigset_t *sigmask), 0);
 DEFINE_STUB(io_uring_submit, int, (struct io_uring *ring), 0);
 DEFINE_STUB(io_uring_queue_init, int, (unsigned entries, struct io_uring *ring, unsigned flags), 0);
 DEFINE_STUB_V(io_uring_queue_exit, (struct io_uring *ring));
@@ -236,7 +233,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("uring", NULL, NULL);
@@ -245,11 +241,9 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, flush_client);
 	CU_ADD_TEST(suite, flush_server);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

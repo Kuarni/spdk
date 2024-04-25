@@ -54,6 +54,7 @@ struct spdk_nvmf_custom_admin_cmd {
 static struct spdk_nvmf_custom_admin_cmd g_nvmf_custom_admin_cmd_hdlrs[SPDK_NVME_MAX_OPC + 1];
 
 static void _nvmf_request_complete(void *ctx);
+int nvmf_passthru_admin_cmd_for_ctrlr(struct spdk_nvmf_request *req, struct spdk_nvmf_ctrlr *ctrlr);
 
 static inline void
 nvmf_invalid_connect_response(struct spdk_nvmf_fabric_connect_rsp *rsp,
@@ -409,7 +410,7 @@ nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 	/* Coalescing Disable */
 	ctrlr->feat.interrupt_vector_configuration.bits.cd = 1;
 
-	if (ctrlr->subsys->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(ctrlr->subsys)) {
 		/*
 		 * If keep-alive timeout is not set, discovery controllers use some
 		 * arbitrary high value in order to cleanup stale discovery sessions
@@ -582,7 +583,7 @@ nvmf_ctrlr_add_io_qpair(void *ctx)
 		goto end;
 	}
 
-	if (ctrlr->subsys->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(ctrlr->subsys)) {
 		SPDK_ERRLOG("I/O connect not allowed on discovery controller\n");
 		SPDK_NVMF_INVALID_CONNECT_CMD(rsp, qid);
 		goto end;
@@ -909,8 +910,10 @@ retry_connect(void *arg)
 	int rc;
 
 	sgroup = nvmf_subsystem_pg_from_connect_cmd(req);
-	assert(sgroup != NULL);
-	sgroup->mgmt_io_outstanding++;
+	/* subsystem may be deleted during the retry interval, so we need to check sgroup */
+	if (sgroup != NULL) {
+		sgroup->mgmt_io_outstanding++;
+	}
 	spdk_poller_unregister(&req->poller);
 	rc = nvmf_ctrlr_cmd_connect(req);
 	if (rc == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE) {
@@ -2555,7 +2558,7 @@ nvmf_ctrlr_get_log_page(struct spdk_nvmf_request *req)
 	SPDK_DEBUGLOG(nvmf, "Get log page: LID=0x%02X offset=0x%" PRIx64 " len=0x%" PRIx64 " rae=%u\n",
 		      lid, offset, len, rae);
 
-	if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(subsystem)) {
 		switch (lid) {
 		case SPDK_NVME_LOG_DISCOVERY:
 			if (spdk_nvmf_qpair_get_listen_trid(req->qpair, &cmd_source_trid)) {
@@ -2755,7 +2758,7 @@ spdk_nvmf_ctrlr_identify_ctrlr(struct spdk_nvmf_ctrlr *ctrlr, struct spdk_nvme_c
 	SPDK_DEBUGLOG(nvmf, "sgls data: 0x%x\n", from_le32(&cdata->sgls));
 
 
-	if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(subsystem)) {
 		/*
 		 * NVM Discovery subsystem fields
 		 */
@@ -3049,6 +3052,49 @@ nvmf_ctrlr_identify_ns_id_descriptor_list(
 }
 
 static int
+nvmf_ctrlr_identify_iocs(struct spdk_nvmf_ctrlr *ctrlr,
+			 struct spdk_nvme_cmd *cmd,
+			 struct spdk_nvme_cpl *rsp,
+			 void *cdata, size_t cdata_size)
+{
+	struct spdk_nvme_iocs_vector *vector;
+	struct spdk_nvmf_ns *ns;
+
+	if (cdata_size < sizeof(struct spdk_nvme_iocs_vector)) {
+		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+		rsp->status.sc = SPDK_NVME_SC_INVALID_FIELD;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	/* For now we only support this command sent to the current
+	 * controller.
+	 */
+	if (cmd->cdw10_bits.identify.cntid != 0xFFFF &&
+	    cmd->cdw10_bits.identify.cntid != ctrlr->cntlid) {
+		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+		rsp->status.sc = SPDK_NVME_SC_INVALID_FIELD;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+	memset(cdata, 0, cdata_size);
+
+	vector = cdata;
+	vector->nvm = 1;
+	for (ns = spdk_nvmf_subsystem_get_first_ns(ctrlr->subsys); ns != NULL;
+	     ns = spdk_nvmf_subsystem_get_next_ns(ctrlr->subsys, ns)) {
+		if (ns->bdev == NULL) {
+			continue;
+		}
+		if (spdk_bdev_is_zoned(ns->bdev)) {
+			vector->zns = 1;
+		}
+	}
+
+	rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+	rsp->status.sc = SPDK_NVME_SC_SUCCESS;
+	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+}
+
+static int
 nvmf_ctrlr_identify(struct spdk_nvmf_request *req)
 {
 	uint8_t cns;
@@ -3069,7 +3115,7 @@ nvmf_ctrlr_identify(struct spdk_nvmf_request *req)
 
 	cns = cmd->cdw10_bits.identify.cns;
 
-	if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY &&
+	if (spdk_nvmf_subsystem_is_discovery(subsystem) &&
 	    cns != SPDK_NVME_IDENTIFY_CTRLR) {
 		/* Discovery controllers only support Identify Controller */
 		goto invalid_cns;
@@ -3102,6 +3148,9 @@ nvmf_ctrlr_identify(struct spdk_nvmf_request *req)
 		break;
 	case SPDK_NVME_IDENTIFY_CTRLR_IOCS:
 		ret = spdk_nvmf_ctrlr_identify_iocs_specific(ctrlr, cmd, rsp, (void *)&tmpbuf, req->length);
+		break;
+	case SPDK_NVME_IDENTIFY_IOCS:
+		ret = nvmf_ctrlr_identify_iocs(ctrlr, cmd, rsp, (void *)&tmpbuf, req->length);
 		break;
 	default:
 		goto invalid_cns;
@@ -3314,7 +3363,7 @@ nvmf_ctrlr_get_features(struct spdk_nvmf_request *req)
 
 	feature = cmd->cdw10_bits.get_features.fid;
 
-	if (ctrlr->subsys->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(ctrlr->subsys)) {
 		/*
 		 * Features supported by Discovery controller
 		 */
@@ -3412,7 +3461,7 @@ nvmf_ctrlr_set_features(struct spdk_nvmf_request *req)
 
 	feature = cmd->cdw10_bits.set_features.fid;
 
-	if (ctrlr->subsys->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(ctrlr->subsys)) {
 		/*
 		 * Features supported by Discovery controller
 		 */
@@ -3526,6 +3575,13 @@ nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req)
 	struct spdk_nvmf_subsystem_poll_group *sgroup;
 	int rc;
 
+	if (ctrlr == NULL) {
+		SPDK_ERRLOG("Admin command sent before CONNECT\n");
+		response->status.sct = SPDK_NVME_SCT_GENERIC;
+		response->status.sc = SPDK_NVME_SC_COMMAND_SEQUENCE_ERROR;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
 	if (cmd->opc == SPDK_NVME_OPC_ASYNC_EVENT_REQUEST) {
 		/* We do not want to treat AERs as outstanding commands,
 		 * so decrement mgmt_io_outstanding here to offset
@@ -3534,13 +3590,6 @@ nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req)
 		sgroup = &req->qpair->group->sgroups[ctrlr->subsys->id];
 		assert(sgroup != NULL);
 		sgroup->mgmt_io_outstanding--;
-	}
-
-	if (ctrlr == NULL) {
-		SPDK_ERRLOG("Admin command sent before CONNECT\n");
-		response->status.sct = SPDK_NVME_SCT_GENERIC;
-		response->status.sc = SPDK_NVME_SC_COMMAND_SEQUENCE_ERROR;
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 
 	assert(spdk_get_thread() == ctrlr->thread);
@@ -3563,7 +3612,7 @@ nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req)
 		spdk_iov_memset(req->iov, req->iovcnt, 0);
 	}
 
-	if (ctrlr->subsys->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+	if (spdk_nvmf_subsystem_is_discovery(ctrlr->subsys)) {
 		/* Discovery controllers only support these admin OPS. */
 		switch (cmd->opc) {
 		case SPDK_NVME_OPC_IDENTIFY:
@@ -4544,10 +4593,6 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 	struct spdk_nvmf_transport *transport = qpair->transport;
 	enum spdk_nvmf_request_exec_status status;
 
-	if (req->data != NULL) {
-		assert(req->iovcnt > 0);
-	}
-
 	if (!nvmf_check_subsystem_active(req)) {
 		return;
 	}
@@ -4635,21 +4680,13 @@ spdk_nvmf_set_custom_admin_cmd_hdlr(uint8_t opc, spdk_nvmf_custom_cmd_hdlr hdlr)
 }
 
 static int
-nvmf_passthru_admin_cmd(struct spdk_nvmf_request *req)
+nvmf_passthru_admin_cmd_for_bdev_nsid(struct spdk_nvmf_request *req, uint32_t bdev_nsid)
 {
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc;
 	struct spdk_io_channel *ch;
-	struct spdk_nvme_cmd *cmd = spdk_nvmf_request_get_cmd(req);
 	struct spdk_nvme_cpl *response = spdk_nvmf_request_get_response(req);
-	uint32_t bdev_nsid;
 	int rc;
-
-	if (g_nvmf_custom_admin_cmd_hdlrs[cmd->opc].nsid == 0) {
-		bdev_nsid = cmd->nsid;
-	} else {
-		bdev_nsid = g_nvmf_custom_admin_cmd_hdlrs[cmd->opc].nsid;
-	}
 
 	rc = spdk_nvmf_request_get_bdev(bdev_nsid, req, &bdev, &desc, &ch);
 	if (rc) {
@@ -4658,6 +4695,38 @@ nvmf_passthru_admin_cmd(struct spdk_nvmf_request *req)
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 	return spdk_nvmf_bdev_ctrlr_nvme_passthru_admin(bdev, desc, ch, req, NULL);
+}
+
+static int
+nvmf_passthru_admin_cmd(struct spdk_nvmf_request *req)
+{
+	struct spdk_nvme_cmd *cmd = spdk_nvmf_request_get_cmd(req);
+	uint32_t bdev_nsid;
+
+	if (g_nvmf_custom_admin_cmd_hdlrs[cmd->opc].nsid != 0) {
+		bdev_nsid = g_nvmf_custom_admin_cmd_hdlrs[cmd->opc].nsid;
+	} else {
+		bdev_nsid = cmd->nsid;
+	}
+
+	return nvmf_passthru_admin_cmd_for_bdev_nsid(req, bdev_nsid);
+}
+
+int
+nvmf_passthru_admin_cmd_for_ctrlr(struct spdk_nvmf_request *req, struct spdk_nvmf_ctrlr *ctrlr)
+{
+	struct spdk_nvme_cpl *response = spdk_nvmf_request_get_response(req);
+	struct spdk_nvmf_ns *ns;
+
+	ns = spdk_nvmf_subsystem_get_first_ns(ctrlr->subsys);
+	if (ns == NULL) {
+		/* Is there a better sc to use here? */
+		response->status.sct = SPDK_NVME_SCT_GENERIC;
+		response->status.sc = SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	return nvmf_passthru_admin_cmd_for_bdev_nsid(req, ns->nsid);
 }
 
 void
@@ -4712,17 +4781,6 @@ struct spdk_nvme_cpl *spdk_nvmf_request_get_response(struct spdk_nvmf_request *r
 struct spdk_nvmf_subsystem *spdk_nvmf_request_get_subsystem(struct spdk_nvmf_request *req)
 {
 	return req->qpair->ctrlr->subsys;
-}
-
-SPDK_LOG_DEPRECATION_REGISTER(nvmf_request_get_data, "spdk_nvmf_request_get_data",
-			      "SPDK 23.09", 60);
-
-void
-spdk_nvmf_request_get_data(struct spdk_nvmf_request *req, void **data, uint32_t *length)
-{
-	SPDK_LOG_DEPRECATED(nvmf_request_get_data);
-	*data = req->data;
-	*length = req->length;
 }
 
 size_t

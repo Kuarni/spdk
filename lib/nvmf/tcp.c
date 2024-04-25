@@ -49,6 +49,7 @@
 #define TCP_PSK_INVALID_PERMISSIONS 0177
 
 const struct spdk_nvmf_transport_ops spdk_nvmf_transport_tcp;
+static bool g_tls_log = false;
 
 /* spdk nvmf related structure */
 enum spdk_nvmf_tcp_req_state {
@@ -298,6 +299,9 @@ struct spdk_nvmf_tcp_qpair {
 	/* IP port */
 	uint16_t				initiator_port;
 	uint16_t				target_port;
+
+	/* Wait until the host terminates the connection (e.g. after sending C2HTermReq) */
+	bool					wait_terminate;
 
 	/* Timer used to destroy qpair after detecting transport error issue if initiator does
 	 *  not close the connection.
@@ -762,8 +766,8 @@ nvmf_tcp_trsvcid_to_int(const char *trsvcid)
 		return -1;
 	}
 
-	/* Valid TCP/IP port numbers are in [0, 65535] */
-	if (ull > 65535) {
+	/* Valid TCP/IP port numbers are in [1, 65535] */
+	if (ull == 0 || ull > 65535) {
 		return -1;
 	}
 
@@ -904,6 +908,10 @@ nvmf_tcp_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_tr
 	spdk_sock_get_default_opts(&opts);
 	opts.priority = ttransport->tcp_opts.sock_priority;
 	if (listen_opts->secure_channel) {
+		if (!g_tls_log) {
+			SPDK_NOTICELOG("TLS support is considered experimental\n");
+			g_tls_log = true;
+		}
 		sock_impl_name = "ssl";
 		spdk_sock_impl_get_opts(sock_impl_name, &impl_opts, &impl_opts_size);
 		impl_opts.tls_version = SPDK_TLS_VERSION_1_3;
@@ -1649,6 +1657,7 @@ nvmf_tcp_send_c2h_term_req(struct spdk_nvmf_tcp_qpair *tqpair, struct nvme_tcp_p
 
 	/* Contain the header of the wrong received pdu */
 	c2h_term_req->common.plen = c2h_term_req->common.hlen + copy_len;
+	tqpair->wait_terminate = true;
 	nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_QUIESCING);
 	nvmf_tcp_qpair_write_mgmt_pdu(tqpair, nvmf_tcp_send_c2h_term_req_complete, tqpair);
 }
@@ -2000,13 +2009,19 @@ _nvmf_tcp_pdu_payload_handle(struct spdk_nvmf_tcp_qpair *tqpair, struct nvme_tcp
 	tqpair->tcp_pdu_working_count--;
 }
 
+static inline void
+nvmf_tcp_req_set_cpl(struct spdk_nvmf_tcp_req *treq, int sct, int sc)
+{
+	treq->req.rsp->nvme_cpl.status.sct = sct;
+	treq->req.rsp->nvme_cpl.status.sc = sc;
+	treq->req.rsp->nvme_cpl.cid = treq->req.cmd->nvme_cmd.cid;
+}
+
 static void
 data_crc32_calc_done(void *cb_arg, int status)
 {
 	struct nvme_tcp_pdu *pdu = cb_arg;
 	struct spdk_nvmf_tcp_qpair *tqpair = pdu->qpair;
-	struct spdk_nvmf_tcp_req *tcp_req;
-	struct spdk_nvme_cpl *rsp;
 
 	/* async crc32 calculation is failed and use direct calculation to check */
 	if (spdk_unlikely(status)) {
@@ -2017,10 +2032,9 @@ data_crc32_calc_done(void *cb_arg, int status)
 	pdu->data_digest_crc32 ^= SPDK_CRC32C_XOR;
 	if (!MATCH_DIGEST_WORD(pdu->data_digest, pdu->data_digest_crc32)) {
 		SPDK_ERRLOG("Data digest error on tqpair=(%p) with pdu=%p\n", tqpair, pdu);
-		tcp_req = pdu->req;
-		assert(tcp_req != NULL);
-		rsp = &tcp_req->req.rsp->nvme_cpl;
-		rsp->status.sc = SPDK_NVME_SC_COMMAND_TRANSIENT_TRANSPORT_ERROR;
+		assert(pdu->req != NULL);
+		nvmf_tcp_req_set_cpl(pdu->req, SPDK_NVME_SCT_GENERIC,
+				     SPDK_NVME_SC_COMMAND_TRANSIENT_TRANSPORT_ERROR);
 	}
 	_nvmf_tcp_pdu_payload_handle(tqpair, pdu);
 }
@@ -2294,7 +2308,11 @@ nvmf_tcp_sock_process(struct spdk_nvmf_tcp_qpair *tqpair)
 		SPDK_DEBUGLOG(nvmf_tcp, "tqpair(%p) recv pdu entering state %d\n", tqpair, prev_state);
 
 		pdu = tqpair->pdu_in_progress;
-		assert(pdu || tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_READY);
+		assert(pdu != NULL ||
+		       tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_READY ||
+		       tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_QUIESCING ||
+		       tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_ERROR);
+
 		switch (tqpair->recv_state) {
 		/* Wait for the common header  */
 		case NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_READY:
@@ -2402,10 +2420,10 @@ nvmf_tcp_sock_process(struct spdk_nvmf_tcp_qpair *tqpair)
 			nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_ERROR);
 			break;
 		case NVME_TCP_PDU_RECV_STATE_ERROR:
-			if (!spdk_sock_is_connected(tqpair->sock)) {
-				return NVME_TCP_PDU_FATAL;
+			if (spdk_sock_is_connected(tqpair->sock) && tqpair->wait_terminate) {
+				return NVME_TCP_PDU_IN_PROGRESS;
 			}
-			return NVME_TCP_PDU_IN_PROGRESS;
+			return NVME_TCP_PDU_FATAL;
 		default:
 			SPDK_ERRLOG("The state(%d) is invalid\n", tqpair->recv_state);
 			abort();
@@ -2493,9 +2511,6 @@ nvmf_tcp_req_parse_sgl(struct spdk_nvmf_tcp_req *tcp_req,
 			return 0;
 		}
 
-		/* backward compatible */
-		req->data = req->iov[0].iov_base;
-
 		SPDK_DEBUGLOG(nvmf_tcp, "Request %p took %d buffer/s from central pool, and data=%p\n",
 			      tcp_req, req->iovcnt, req->iov[0].iov_base);
 
@@ -2562,7 +2577,6 @@ nvmf_tcp_req_parse_sgl(struct spdk_nvmf_tcp_req *tcp_req,
 
 		req->length = length;
 		req->data_from_pool = false;
-		req->data = req->iov[0].iov_base;
 
 		if (spdk_unlikely(req->dif_enabled)) {
 			length = spdk_dif_get_length_with_md(length, &req->dif.dif_ctx);
@@ -2875,9 +2889,7 @@ nvmf_tcp_req_process(struct spdk_nvmf_tcp_transport *ttransport,
 			tcp_req->req.xfer = spdk_nvmf_req_get_xfer(&tcp_req->req);
 
 			if (spdk_unlikely(tcp_req->req.xfer == SPDK_NVME_DATA_BIDIRECTIONAL)) {
-				tcp_req->req.rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
-				tcp_req->req.rsp->nvme_cpl.status.sc  = SPDK_NVME_SC_INVALID_OPCODE;
-				tcp_req->req.rsp->nvme_cpl.cid = tcp_req->req.cmd->nvme_cmd.cid;
+				nvmf_tcp_req_set_cpl(tcp_req, SPDK_NVME_SCT_GENERIC, SPDK_NVME_SC_INVALID_OPCODE);
 				nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_READY);
 				nvmf_tcp_req_set_state(tcp_req, TCP_REQUEST_STATE_READY_TO_COMPLETE);
 				SPDK_DEBUGLOG(nvmf_tcp, "Request %p: invalid xfer type (BIDIRECTIONAL)\n", tcp_req);
@@ -3019,9 +3031,7 @@ nvmf_tcp_req_process(struct spdk_nvmf_tcp_transport *ttransport,
 					/* This request failed FUSED semantics.  Fail it immediately, without
 					 * even sending it to the target layer.
 					 */
-					tcp_req->req.rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
-					tcp_req->req.rsp->nvme_cpl.status.sc = SPDK_NVME_SC_ABORTED_MISSING_FUSED;
-					tcp_req->req.rsp->nvme_cpl.cid = tcp_req->req.cmd->nvme_cmd.cid;
+					nvmf_tcp_req_set_cpl(tcp_req, SPDK_NVME_SCT_GENERIC, SPDK_NVME_SC_ABORTED_MISSING_FUSED);
 					nvmf_tcp_req_set_state(tcp_req, TCP_REQUEST_STATE_READY_TO_COMPLETE);
 					break;
 				}
@@ -3152,7 +3162,6 @@ nvmf_tcp_req_process(struct spdk_nvmf_tcp_transport *ttransport,
 			}
 			tcp_req->req.length = 0;
 			tcp_req->req.iovcnt = 0;
-			tcp_req->req.data = NULL;
 			tcp_req->fused_failed = false;
 			if (tcp_req->fused_pair) {
 				/* This req was part of a valid fused pair, but failed before it got to
@@ -3415,10 +3424,7 @@ static void
 nvmf_tcp_req_set_abort_status(struct spdk_nvmf_request *req,
 			      struct spdk_nvmf_tcp_req *tcp_req_to_abort)
 {
-	tcp_req_to_abort->req.rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
-	tcp_req_to_abort->req.rsp->nvme_cpl.status.sc = SPDK_NVME_SC_ABORTED_BY_REQUEST;
-	tcp_req_to_abort->req.rsp->nvme_cpl.cid = tcp_req_to_abort->req.cmd->nvme_cmd.cid;
-
+	nvmf_tcp_req_set_cpl(tcp_req_to_abort, SPDK_NVME_SCT_GENERIC, SPDK_NVME_SC_ABORTED_BY_REQUEST);
 	nvmf_tcp_req_set_state(tcp_req_to_abort, TCP_REQUEST_STATE_READY_TO_COMPLETE);
 
 	req->rsp->nvme_cpl.cdw0 &= ~1U; /* Command was successfully aborted. */
@@ -3695,6 +3701,14 @@ nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 		entry->psk_size = rc;
 	}
 
+	rc = snprintf(entry->psk_path, sizeof(entry->psk_path), "%s", opts.psk);
+	if (rc < 0 || (size_t)rc >= sizeof(entry->psk_path)) {
+		SPDK_ERRLOG("Could not save PSK path!\n");
+		rc = -ENAMETOOLONG;
+		free(entry);
+		goto end;
+	}
+
 	TAILQ_INSERT_TAIL(&ttransport->psks, entry, link);
 	rc = 0;
 
@@ -3725,6 +3739,27 @@ nvmf_tcp_subsystem_remove_host(struct spdk_nvmf_transport *transport,
 			TAILQ_REMOVE(&ttransport->psks, entry, link);
 			spdk_memset_s(entry->psk, sizeof(entry->psk), 0, sizeof(entry->psk));
 			free(entry);
+			break;
+		}
+	}
+}
+
+static void
+nvmf_tcp_subsystem_dump_host(struct spdk_nvmf_transport *transport,
+			     const struct spdk_nvmf_subsystem *subsystem, const char *hostnqn,
+			     struct spdk_json_write_ctx *w)
+{
+	struct spdk_nvmf_tcp_transport *ttransport;
+	struct tcp_psk_entry *entry;
+
+	assert(transport != NULL);
+	assert(subsystem != NULL);
+
+	ttransport = SPDK_CONTAINEROF(transport, struct spdk_nvmf_tcp_transport, transport);
+	TAILQ_FOREACH(entry, &ttransport->psks, link) {
+		if ((strncmp(entry->hostnqn, hostnqn, SPDK_NVMF_NQN_MAX_LEN)) == 0 &&
+		    (strncmp(entry->subnqn, subsystem->subnqn, SPDK_NVMF_NQN_MAX_LEN)) == 0) {
+			spdk_json_write_named_string(w, "psk", entry->psk_path);
 			break;
 		}
 	}
@@ -3776,6 +3811,7 @@ const struct spdk_nvmf_transport_ops spdk_nvmf_transport_tcp = {
 	.qpair_abort_request = nvmf_tcp_qpair_abort_request,
 	.subsystem_add_host = nvmf_tcp_subsystem_add_host,
 	.subsystem_remove_host = nvmf_tcp_subsystem_remove_host,
+	.subsystem_dump_host = nvmf_tcp_subsystem_dump_host,
 };
 
 SPDK_NVMF_TRANSPORT_REGISTER(tcp, &spdk_nvmf_transport_tcp);

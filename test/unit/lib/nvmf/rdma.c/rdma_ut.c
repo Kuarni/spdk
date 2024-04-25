@@ -1,10 +1,11 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019, 2021 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "common/lib/test_iobuf.c"
 #include "common/lib/test_rdma.c"
@@ -36,8 +37,6 @@ DEFINE_STUB(spdk_nvmf_qpair_get_listen_trid, int,
 	    (struct spdk_nvmf_qpair *qpair, struct spdk_nvme_transport_id *trid), 0);
 DEFINE_STUB_V(spdk_mem_map_free, (struct spdk_mem_map **pmap));
 
-DEFINE_STUB_V(spdk_nvmf_ctrlr_data_init, (struct spdk_nvmf_transport_opts *opts,
-		struct spdk_nvmf_ctrlr_data *cdata));
 DEFINE_STUB_V(spdk_nvmf_request_exec, (struct spdk_nvmf_request *req));
 DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req), 0);
 DEFINE_STUB(spdk_nvme_transport_id_compare, int, (const struct spdk_nvme_transport_id *trid1,
@@ -463,7 +462,7 @@ create_req(struct spdk_nvmf_rdma_qpair *rqpair,
 	rdma_req->recv = rdma_recv;
 	rdma_req->req.qpair = &rqpair->qpair;
 	rdma_req->state = RDMA_REQUEST_STATE_NEW;
-	rdma_req->data.wr.wr_id = (uintptr_t)&rdma_req->data.rdma_wr;
+	rdma_req->data.wr.wr_id = (uintptr_t)&rdma_req->data_wr;
 	rdma_req->data.wr.sg_list = rdma_req->data.sgl;
 	cpl = calloc(1, sizeof(*cpl));
 	rdma_req->rsp.sgl[0].addr = (uintptr_t)cpl;
@@ -522,7 +521,10 @@ test_spdk_nvmf_rdma_request_process(void)
 	struct spdk_nvmf_rdma_qpair rqpair = {};
 	struct spdk_nvmf_rdma_recv *rdma_recv;
 	struct spdk_nvmf_rdma_request *rdma_req;
+	struct spdk_iobuf_channel ch = {};
 	bool progress;
+
+	group.group.buf_cache = &ch;
 
 	STAILQ_INIT(&group.group.pending_buf_queue);
 	poller_reset(&poller, &group);
@@ -1194,12 +1196,13 @@ test_nvmf_rdma_request_free_data(void)
 	next_request_data = spdk_mempool_get(rtransport.data_wr_pool);
 	SPDK_CU_ASSERT_FATAL(((struct test_mempool *)rtransport.data_wr_pool)->count ==
 			     SPDK_NVMF_MAX_SGL_ENTRIES - 1);
-	next_request_data->wr.wr_id = 1;
+	next_request_data->wr.wr_id = (uint64_t)&rdma_req.data_wr;
 	next_request_data->wr.num_sge = 2;
 	next_request_data->wr.next = NULL;
 	rdma_req.data.wr.next = &next_request_data->wr;
-	rdma_req.data.wr.wr_id = 1;
+	rdma_req.data.wr.wr_id = (uint64_t)&rdma_req.data_wr;
 	rdma_req.data.wr.num_sge = 2;
+	rdma_req.transfer_wr = &rdma_req.data.wr;
 
 	nvmf_rdma_request_free_data(&rdma_req, &rtransport);
 	/* Check if next_request_data put into memory pool */
@@ -1272,15 +1275,15 @@ test_nvmf_rdma_resources_create(void)
 	CU_ASSERT(req->rsp.sgl[0].addr == (uintptr_t)&rdma_resource->cpls[0]);
 	CU_ASSERT(req->rsp.sgl[0].length == sizeof(rdma_resource->cpls[0]));
 	CU_ASSERT(req->rsp.sgl[0].lkey == RDMA_UT_LKEY);
-	CU_ASSERT(req->rsp.rdma_wr.type == RDMA_WR_TYPE_SEND);
-	CU_ASSERT(req->rsp.wr.wr_id == (uintptr_t)&rdma_resource->reqs[0].rsp.rdma_wr);
+	CU_ASSERT(req->rsp_wr.type == RDMA_WR_TYPE_SEND);
+	CU_ASSERT(req->rsp.wr.wr_id == (uintptr_t)&rdma_resource->reqs[0].rsp_wr);
 	CU_ASSERT(req->rsp.wr.next == NULL);
 	CU_ASSERT(req->rsp.wr.opcode == IBV_WR_SEND);
 	CU_ASSERT(req->rsp.wr.send_flags == IBV_SEND_SIGNALED);
 	CU_ASSERT(req->rsp.wr.sg_list == rdma_resource->reqs[0].rsp.sgl);
 	CU_ASSERT(req->rsp.wr.num_sge == NVMF_DEFAULT_RSP_SGE);
-	CU_ASSERT(req->data.rdma_wr.type == RDMA_WR_TYPE_DATA);
-	CU_ASSERT(req->data.wr.wr_id == (uintptr_t)&rdma_resource->reqs[0].data.rdma_wr);
+	CU_ASSERT(req->data_wr.type == RDMA_WR_TYPE_DATA);
+	CU_ASSERT(req->data.wr.wr_id == (uintptr_t)&rdma_resource->reqs[0].data_wr);
 	CU_ASSERT(req->data.wr.next == NULL);
 	CU_ASSERT(req->data.wr.send_flags == IBV_SEND_SIGNALED);
 	CU_ASSERT(req->data.wr.sg_list == rdma_resource->reqs[0].data.sgl);
@@ -1302,17 +1305,15 @@ test_nvmf_rdma_resources_create(void)
 	CU_ASSERT(req->rsp.sgl[0].addr == (uintptr_t)&rdma_resource->cpls[DEPTH - 1]);
 	CU_ASSERT(req->rsp.sgl[0].length == sizeof(rdma_resource->cpls[DEPTH - 1]));
 	CU_ASSERT(req->rsp.sgl[0].lkey == RDMA_UT_LKEY);
-	CU_ASSERT(req->rsp.rdma_wr.type == RDMA_WR_TYPE_SEND);
-	CU_ASSERT(req->rsp.wr.wr_id == (uintptr_t)
-		  &req->rsp.rdma_wr);
+	CU_ASSERT(req->rsp_wr.type == RDMA_WR_TYPE_SEND);
+	CU_ASSERT(req->rsp.wr.wr_id == (uintptr_t)&req->rsp_wr);
 	CU_ASSERT(req->rsp.wr.next == NULL);
 	CU_ASSERT(req->rsp.wr.opcode == IBV_WR_SEND);
 	CU_ASSERT(req->rsp.wr.send_flags == IBV_SEND_SIGNALED);
 	CU_ASSERT(req->rsp.wr.sg_list == rdma_resource->reqs[DEPTH - 1].rsp.sgl);
 	CU_ASSERT(req->rsp.wr.num_sge == NVMF_DEFAULT_RSP_SGE);
-	CU_ASSERT(req->data.rdma_wr.type == RDMA_WR_TYPE_DATA);
-	CU_ASSERT(req->data.wr.wr_id == (uintptr_t)
-		  &req->data.rdma_wr);
+	CU_ASSERT(req->data_wr.type == RDMA_WR_TYPE_DATA);
+	CU_ASSERT(req->data.wr.wr_id == (uintptr_t)&req->data_wr);
 	CU_ASSERT(req->data.wr.next == NULL);
 	CU_ASSERT(req->data.wr.send_flags == IBV_SEND_SIGNALED);
 	CU_ASSERT(req->data.wr.sg_list == rdma_resource->reqs[DEPTH - 1].data.sgl);
@@ -1416,7 +1417,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -1432,9 +1432,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvmf_rdma_qpair_compare);
 	CU_ADD_TEST(suite, test_nvmf_rdma_resize_cq);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

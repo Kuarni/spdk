@@ -6,6 +6,21 @@
 #
 rpc_py=rpc_cmd
 
+function xtrace_disable() {
+	set +x
+	X_STACK+=("${FUNCNAME[*]}") # push
+}
+
+function xtrace_restore() {
+	# unset'ing foo[-1] under older Bash (4.2 -> Centos7) won't work, hence the dance
+	unset -v "X_STACK[${#X_STACK[@]} - 1 < 0 ? 0 : ${#X_STACK[@]} - 1]" # pop
+	if ((${#X_STACK[@]} == 0)); then
+		set -x
+	fi
+}
+
+function xtrace_disable_per_cmd() { eval "$* ${BASH_XTRACEFD}> /dev/null"; }
+
 function xtrace_fd() {
 	if [[ -n ${BASH_XTRACEFD:-} && -e /proc/self/fd/$BASH_XTRACEFD ]]; then
 		# Close it first to make sure it's sane
@@ -13,28 +28,12 @@ function xtrace_fd() {
 	fi
 	exec {BASH_XTRACEFD}>&2
 
-	set -x
+	xtrace_restore
 }
 
-function xtrace_disable() {
-	if [ "${XTRACE_DISABLED:-}" != "yes" ]; then
-		PREV_BASH_OPTS="$-"
-		if [[ "${PREV_BASH_OPTS:-}" == *"x"* ]]; then
-			XTRACE_DISABLED="yes"
-		fi
-		set +x
-	elif [ -z ${XTRACE_NESTING_LEVEL:-} ]; then
-		XTRACE_NESTING_LEVEL=1
-	else
-		XTRACE_NESTING_LEVEL=$((++XTRACE_NESTING_LEVEL))
-	fi
-}
-
-function xtrace_disable_per_cmd() { eval "$* ${BASH_XTRACEFD}> /dev/null"; }
-
-xtrace_disable
 set -e
-shopt -s expand_aliases
+shopt -s nullglob
+shopt -s extglob
 
 if [[ -e $rootdir/test/common/build_config.sh ]]; then
 	source "$rootdir/test/common/build_config.sh"
@@ -48,28 +47,6 @@ fi
 # Source scripts after the config so that the definitions are available.
 source "$rootdir/test/common/applications.sh"
 source "$rootdir/scripts/common.sh"
-
-# Dummy function to be called after restoring xtrace just so that it appears in the
-# xtrace log. This way we can consistently track when xtrace is enabled/disabled.
-function xtrace_enable() {
-	# We have to do something inside a function in bash, and calling any command
-	# (even `:`) will produce an xtrace entry, so we just define another function.
-	function xtrace_dummy() { :; }
-}
-
-# Keep it as alias to avoid xtrace_enable backtrace always pointing to xtrace_restore.
-# xtrace_enable will appear as called directly from the user script, from the same line
-# that "called" xtrace_restore.
-alias xtrace_restore='if [ -z ${XTRACE_NESTING_LEVEL:-} ]; then
-        if [[ "${PREV_BASH_OPTS:-}" == *"x"* ]]; then
-		XTRACE_DISABLED="no"; PREV_BASH_OPTS=""; set -x; xtrace_enable;
-	fi
-else
-	XTRACE_NESTING_LEVEL=$((--XTRACE_NESTING_LEVEL));
-	if [ $XTRACE_NESTING_LEVEL -eq "0" ]; then
-		unset XTRACE_NESTING_LEVEL
-	fi
-fi'
 
 : ${RUN_NIGHTLY:=0}
 export RUN_NIGHTLY
@@ -175,11 +152,19 @@ export SPDK_TEST_SMA
 export SPDK_TEST_DAOS
 : ${SPDK_TEST_XNVME:=0}
 export SPDK_TEST_XNVME
+: ${SPDK_TEST_ACCEL_DSA=0}
+export SPDK_TEST_ACCEL_DSA
+: ${SPDK_TEST_ACCEL_IAA=0}
+export SPDK_TEST_ACCEL_IAA
+: ${SPDK_TEST_ACCEL_IOAT=0}
+export SPDK_TEST_ACCEL_IOAT
 # Comma-separated list of fuzzer targets matching test/fuzz/llvm/$target
 : ${SPDK_TEST_FUZZER_TARGET:=}
 export SPDK_TEST_FUZZER_TARGET
 : ${SPDK_TEST_NVMF_MDNS=0}
 export SPDK_TEST_NVMF_MDNS
+: ${SPDK_JSONRPC_GO_CLIENT=0}
+export SPDK_JSONRPC_GO_CLIENT
 
 # always test with SPDK shared objects.
 export SPDK_LIB_DIR="$rootdir/build/lib"
@@ -198,10 +183,10 @@ export PYTHONPATH=$PYTHONPATH:$rootdir/python
 # created with root ownership and can cause problems when cleaning the repository.
 export PYTHONDONTWRITEBYTECODE=1
 
-# Export flag to skip the known bug that exists in librados
-# Bug is reported on ceph bug tracker with number 24078
-export ASAN_OPTIONS=new_delete_type_mismatch=0:disable_coredump=0
-export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:abort_on_error=1:disable_coredump=0'
+# Export new_delete_type_mismatch to skip the known bug that exists in librados
+# https://tracker.ceph.com/issues/24078
+export ASAN_OPTIONS=new_delete_type_mismatch=0:disable_coredump=0:exitcode=134:use_sigaltstack=0
+export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:abort_on_error=1:disable_coredump=0:exitcode=134'
 
 # Export LeakSanitizer option to use suppression file in order to prevent false positives
 # and known leaks in external executables or libraries from showing up.
@@ -525,6 +510,10 @@ function get_config_params() {
 		config_params+=' --with-avahi'
 	fi
 
+	if [[ $SPDK_JSONRPC_GO_CLIENT -eq 1 ]]; then
+		config_params+=' --with-golang'
+	fi
+
 	echo "$config_params"
 	xtrace_restore
 }
@@ -772,9 +761,7 @@ function process_core() {
 
 	local coredumps core
 
-	shopt -s nullglob
 	coredumps=("$output_dir/coredumps/"*.bt.txt)
-	shopt -u nullglob
 
 	((${#coredumps[@]} > 0)) || return 0
 	chmod -R a+r "$output_dir/coredumps"
@@ -1391,9 +1378,7 @@ function autotest_cleanup() {
 		kill "$udevadm_pid" || :
 	fi
 
-	shopt -s nullglob
 	local storage_fallback_purge=("${TMPDIR:-/tmp}/spdk."??????)
-	shopt -u nullglob
 
 	if ((${#storage_fallback_purge[@]} > 0)); then
 		rm -rf "${storage_fallback_purge[@]}"
@@ -1481,29 +1466,32 @@ function get_nvme_ctrlr_from_bdf() {
 # Get BDF addresses of all NVMe drives currently attached to
 # uio-pci-generic or vfio-pci
 function get_nvme_bdfs() {
-	xtrace_disable
-	bdfs=$(jq -r .config[].params.traddr <<< $($rootdir/scripts/gen_nvme.sh))
-	if [[ -z ${bdfs:-} ]]; then
-		echo "No devices to test on!"
-		exit 1
+	local bdfs=()
+	bdfs=($("$rootdir/scripts/gen_nvme.sh" | jq -r '.config[].params.traddr'))
+	if ((${#bdfs[@]} == 0)); then
+		echo "No bdevs found" >&2
+		return 1
 	fi
-	echo "$bdfs"
-	xtrace_restore
+	printf '%s\n' "${bdfs[@]}"
 }
 
 # Same as function above, but just get the first disks BDF address
 function get_first_nvme_bdf() {
-	head -1 <<< "$(get_nvme_bdfs)"
+	local bdfs=()
+	bdfs=($(get_nvme_bdfs))
+
+	echo "${bdfs[0]}"
 }
 
 function nvme_namespace_revert() {
 	$rootdir/scripts/setup.sh
 	sleep 1
-	bdfs=$(get_nvme_bdfs)
+	local bdfs=()
+	bdfs=($(get_nvme_bdfs))
 
 	$rootdir/scripts/setup.sh reset
 
-	for bdf in $bdfs; do
+	for bdf in "${bdfs[@]}"; do
 		nvme_ctrlr=/dev/$(get_nvme_ctrlr_from_bdf ${bdf})
 		if [[ -z "${nvme_ctrlr:-}" ]]; then
 			continue
@@ -1654,10 +1642,7 @@ trap "trap - ERR; print_backtrace >&2" ERR
 PS4=' \t	-- ${BASH_SOURCE#${BASH_SOURCE%/*/*}/}@${LINENO} -- \$ '
 if $SPDK_AUTOTEST_X; then
 	# explicitly enable xtraces, overriding any tracking information.
-	unset XTRACE_DISABLED
-	unset XTRACE_NESTING_LEVEL
 	xtrace_fd
-	xtrace_enable
 else
-	xtrace_restore
+	xtrace_disable
 fi

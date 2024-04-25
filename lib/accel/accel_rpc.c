@@ -20,7 +20,7 @@ rpc_accel_get_opc_assignments(struct spdk_jsonrpc_request *request,
 			      const struct spdk_json_val *params)
 {
 	struct spdk_json_write_ctx *w;
-	enum accel_opcode opcode;
+	enum spdk_accel_opcode opcode;
 	const char *name, *module_name = NULL;
 	int rc;
 
@@ -33,9 +33,9 @@ rpc_accel_get_opc_assignments(struct spdk_jsonrpc_request *request,
 	w = spdk_jsonrpc_begin_result(request);
 
 	spdk_json_write_object_begin(w);
-	for (opcode = 0; opcode < ACCEL_OPC_LAST; opcode++) {
-		rc = _accel_get_opc_name(opcode, &name);
-		if (rc == 0) {
+	for (opcode = 0; opcode < SPDK_ACCEL_OPC_LAST; opcode++) {
+		name = spdk_accel_get_opcode_name(opcode);
+		if (name != NULL) {
 			rc = spdk_accel_get_opc_module_name(opcode, &module_name);
 			if (rc == 0) {
 				spdk_json_write_named_string(w, name, module_name);
@@ -62,7 +62,6 @@ rpc_dump_module_info(struct module_info *info)
 	struct spdk_json_write_ctx *w = info->w;
 	const char *name;
 	uint32_t i;
-	int rc;
 
 	spdk_json_write_object_begin(w);
 
@@ -70,12 +69,12 @@ rpc_dump_module_info(struct module_info *info)
 	spdk_json_write_named_array_begin(w, "supported ops");
 
 	for (i = 0; i < info->num_ops; i++) {
-		rc = _accel_get_opc_name(i, &name);
-		if (rc == 0) {
+		name = spdk_accel_get_opcode_name(info->ops[i]);
+		if (name != NULL) {
 			spdk_json_write_string(w, name);
 		} else {
 			/* this should never happen */
-			SPDK_ERRLOG("Invalid opcode (%d)).\n", i);
+			SPDK_ERRLOG("Invalid opcode (%d)).\n", info->ops[i]);
 			assert(0);
 		}
 	}
@@ -130,7 +129,7 @@ rpc_accel_assign_opc(struct spdk_jsonrpc_request *request,
 {
 	struct rpc_accel_assign_opc req = {};
 	const char *opcode_str;
-	enum accel_opcode opcode;
+	enum spdk_accel_opcode opcode;
 	bool found = false;
 	int rc;
 
@@ -143,9 +142,9 @@ rpc_accel_assign_opc(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	for (opcode = 0; opcode < ACCEL_OPC_LAST; opcode++) {
-		rc = _accel_get_opc_name(opcode, &opcode_str);
-		assert(!rc);
+	for (opcode = 0; opcode < SPDK_ACCEL_OPC_LAST; opcode++) {
+		opcode_str = spdk_accel_get_opcode_name(opcode);
+		assert(opcode_str != NULL);
 		if (strcmp(opcode_str, req.opname) == 0) {
 			found = true;
 			break;
@@ -417,7 +416,7 @@ rpc_accel_get_stats_done(struct accel_stats *stats, void *cb_arg)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
 	struct spdk_json_write_ctx *w;
-	const char *name, *module_name;
+	const char *module_name;
 	int i, rc;
 
 	w = spdk_jsonrpc_begin_result(request);
@@ -426,17 +425,16 @@ rpc_accel_get_stats_done(struct accel_stats *stats, void *cb_arg)
 	spdk_json_write_named_uint64(w, "sequence_executed", stats->sequence_executed);
 	spdk_json_write_named_uint64(w, "sequence_failed", stats->sequence_failed);
 	spdk_json_write_named_array_begin(w, "operations");
-	for (i = 0; i < ACCEL_OPC_LAST; ++i) {
+	for (i = 0; i < SPDK_ACCEL_OPC_LAST; ++i) {
 		if (stats->operations[i].executed + stats->operations[i].failed == 0) {
 			continue;
 		}
-		_accel_get_opc_name(i, &name);
 		rc = spdk_accel_get_opc_module_name(i, &module_name);
 		if (rc) {
 			continue;
 		}
 		spdk_json_write_object_begin(w);
-		spdk_json_write_named_string(w, "opcode", name);
+		spdk_json_write_named_string(w, "opcode", spdk_accel_get_opcode_name(i));
 		spdk_json_write_named_string(w, "module_name", module_name);
 		spdk_json_write_named_uint64(w, "executed", stats->operations[i].executed);
 		spdk_json_write_named_uint64(w, "failed", stats->operations[i].failed);
@@ -444,6 +442,11 @@ rpc_accel_get_stats_done(struct accel_stats *stats, void *cb_arg)
 		spdk_json_write_object_end(w);
 	}
 	spdk_json_write_array_end(w);
+
+	spdk_json_write_named_uint64(w, "retry_task", stats->retry.task);
+	spdk_json_write_named_uint64(w, "retry_sequence", stats->retry.sequence);
+	spdk_json_write_named_uint64(w, "retry_iobuf", stats->retry.iobuf);
+	spdk_json_write_named_uint64(w, "retry_bufdesc", stats->retry.bufdesc);
 
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);

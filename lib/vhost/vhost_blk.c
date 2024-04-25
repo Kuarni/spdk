@@ -57,8 +57,6 @@ struct spdk_vhost_blk_dev {
 	struct spdk_bdev_desc *bdev_desc;
 	const struct spdk_virtio_blk_transport_ops *ops;
 
-	/* dummy_io_channel is used to hold a bdev reference */
-	struct spdk_io_channel *dummy_io_channel;
 	bool readonly;
 };
 
@@ -1158,7 +1156,6 @@ bdev_event_cpl_cb(struct spdk_vhost_dev *vdev, void *ctx)
 		/* All sessions have been notified, time to close the bdev */
 		bvdev = to_blk_dev(vdev);
 		assert(bvdev != NULL);
-		spdk_put_io_channel(bvdev->dummy_io_channel);
 		spdk_bdev_close(bvdev->bdev_desc);
 		bvdev->bdev_desc = NULL;
 		bvdev->bdev = NULL;
@@ -1660,24 +1657,11 @@ spdk_vhost_blk_construct(const char *name, const char *cpumask, const char *dev_
 		vdev->virtio_features |= (1ULL << VIRTIO_BLK_F_FLUSH);
 	}
 
-	/*
-	 * When starting qemu with multiqueue enable, the vhost device will
-	 * be started/stopped many times, related to the queues num, as the
-	 * exact number of queues used for this device is not known at the time.
-	 * The target has to stop and start the device once got a valid IO queue.
-	 * When stopping and starting the vhost device, the backend bdev io device
-	 * will be deleted and created repeatedly.
-	 * Hold a bdev reference so that in the struct spdk_vhost_blk_dev, so that
-	 * the io device will not be deleted.
-	 */
-	bvdev->dummy_io_channel = spdk_bdev_get_io_channel(bvdev->bdev_desc);
-
 	bvdev->bdev = bdev;
 	bvdev->readonly = false;
 	ret = vhost_dev_register(vdev, name, cpumask, params, &vhost_blk_device_backend,
-				 &vhost_blk_user_device_backend);
+				 &vhost_blk_user_device_backend, false);
 	if (ret != 0) {
-		spdk_put_io_channel(bvdev->dummy_io_channel);
 		spdk_bdev_close(bvdev->bdev_desc);
 		goto out;
 	}
@@ -1711,11 +1695,6 @@ vhost_blk_destroy(struct spdk_vhost_dev *vdev)
 	rc = vhost_dev_unregister(&bvdev->vdev);
 	if (rc != 0) {
 		return rc;
-	}
-
-	/* if the bdev is removed, don't need call spdk_put_io_channel. */
-	if (bvdev->bdev) {
-		spdk_put_io_channel(bvdev->dummy_io_channel);
 	}
 
 	if (bvdev->bdev_desc) {
@@ -1776,13 +1755,11 @@ vhost_user_blk_destroy(struct spdk_virtio_blk_transport *transport,
 struct rpc_vhost_blk {
 	bool readonly;
 	bool packed_ring;
-	bool packed_ring_recovery;
 };
 
 static const struct spdk_json_object_decoder rpc_construct_vhost_blk[] = {
 	{"readonly", offsetof(struct rpc_vhost_blk, readonly), spdk_json_decode_bool, true},
 	{"packed_ring", offsetof(struct rpc_vhost_blk, packed_ring), spdk_json_decode_bool, true},
-	{"packed_ring_recovery", offsetof(struct rpc_vhost_blk, packed_ring_recovery), spdk_json_decode_bool, true},
 };
 
 static int
@@ -1801,18 +1778,15 @@ vhost_user_blk_create_ctrlr(struct spdk_vhost_dev *vdev, struct spdk_cpuset *cpu
 		return -EINVAL;
 	}
 
-	vdev->packed_ring_recovery = false;
-
 	if (req.packed_ring) {
 		vdev->virtio_features |= (uint64_t)req.packed_ring << VIRTIO_F_RING_PACKED;
-		vdev->packed_ring_recovery = req.packed_ring_recovery;
 	}
 	if (req.readonly) {
 		vdev->virtio_features |= (1ULL << VIRTIO_BLK_F_RO);
 		bvdev->readonly = req.readonly;
 	}
 
-	return vhost_user_dev_register(vdev, address, cpumask, custom_opts);
+	return vhost_user_dev_create(vdev, address, cpumask, custom_opts, false);
 }
 
 static int

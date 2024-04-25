@@ -513,10 +513,10 @@ accel_mlx5_task_init(struct accel_mlx5_task *mlx5_task, struct accel_mlx5_dev *d
 	uint32_t i;
 
 	switch (task->op_code) {
-	case ACCEL_OPC_ENCRYPT:
+	case SPDK_ACCEL_OPC_ENCRYPT:
 		mlx5_task->encrypt_on_tx = true;
 		break;
-	case ACCEL_OPC_DECRYPT:
+	case SPDK_ACCEL_OPC_DECRYPT:
 		mlx5_task->encrypt_on_tx = false;
 		break;
 	default:
@@ -723,13 +723,13 @@ accel_mlx5_poller(void *ctx)
 }
 
 static bool
-accel_mlx5_supports_opcode(enum accel_opcode opc)
+accel_mlx5_supports_opcode(enum spdk_accel_opcode opc)
 {
 	assert(g_accel_mlx5.enabled);
 
 	switch (opc) {
-	case ACCEL_OPC_ENCRYPT:
-	case ACCEL_OPC_DECRYPT:
+	case SPDK_ACCEL_OPC_ENCRYPT:
+	case SPDK_ACCEL_OPC_DECRYPT:
 		return true;
 	default:
 		return false;
@@ -1165,9 +1165,14 @@ accel_mlx5_crypto_key_deinit(struct spdk_accel_crypto_key *key)
 }
 
 static bool
-accel_mlx5_crypto_supports_cipher(enum spdk_accel_cipher cipher)
+accel_mlx5_crypto_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size)
 {
-	return cipher == SPDK_ACCEL_CIPHER_AES_XTS;
+	switch (cipher) {
+	case SPDK_ACCEL_CIPHER_AES_XTS:
+		return key_size == SPDK_ACCEL_AES_XTS_128_KEY_SIZE || key_size == SPDK_ACCEL_AES_XTS_256_KEY_SIZE;
+	default:
+		return false;
+	}
 }
 
 static struct accel_mlx5_module g_accel_mlx5 = {

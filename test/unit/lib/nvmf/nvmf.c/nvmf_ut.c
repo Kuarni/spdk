@@ -4,7 +4,7 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "nvmf/nvmf.c"
 #include "spdk/bdev_module.h"
@@ -28,7 +28,6 @@ DEFINE_STUB(nvmf_transport_poll_group_remove, int, (struct spdk_nvmf_transport_p
 		struct spdk_nvmf_qpair *qpair), 0);
 DEFINE_STUB(nvmf_transport_req_free, int, (struct spdk_nvmf_request *req), 0);
 DEFINE_STUB(nvmf_transport_poll_group_poll, int, (struct spdk_nvmf_transport_poll_group *group), 0);
-DEFINE_STUB(nvmf_transport_accept, uint32_t, (struct spdk_nvmf_transport *transport), 0);
 DEFINE_STUB_V(nvmf_subsystem_remove_all_listeners, (struct spdk_nvmf_subsystem *subsystem,
 		bool stop));
 DEFINE_STUB(spdk_nvmf_subsystem_destroy, int, (struct spdk_nvmf_subsystem *subsystem,
@@ -106,8 +105,13 @@ DEFINE_STUB(spdk_nvmf_subsystem_get_first, struct spdk_nvmf_subsystem *,
 	    (struct spdk_nvmf_tgt *tgt), NULL);
 DEFINE_STUB_V(nvmf_transport_dump_opts, (struct spdk_nvmf_transport *transport,
 		struct spdk_json_write_ctx *w, bool named));
+DEFINE_STUB_V(nvmf_transport_listen_dump_trid, (const struct spdk_nvme_transport_id *trid,
+		struct spdk_json_write_ctx *w));
 DEFINE_STUB_V(nvmf_transport_listen_dump_opts, (struct spdk_nvmf_transport *transport,
 		const struct spdk_nvme_transport_id *trid, struct spdk_json_write_ctx *w));
+DEFINE_STUB(spdk_nvme_transport_id_compare, int, (const struct spdk_nvme_transport_id *trid1,
+		const struct spdk_nvme_transport_id *trid2), 0);
+DEFINE_STUB_V(nvmf_update_discovery_log, (struct spdk_nvmf_tgt *tgt, const char *hostnqn));
 
 struct spdk_io_channel {
 	struct spdk_thread		*thread;
@@ -220,16 +224,13 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
 
 	CU_ADD_TEST(suite, test_nvmf_tgt_create_poll_group);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

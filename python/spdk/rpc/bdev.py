@@ -5,13 +5,16 @@
 
 
 def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None,
-                     bdev_auto_examine=None):
+                     bdev_auto_examine=None, iobuf_small_cache_size=None,
+                     iobuf_large_cache_size=None):
     """Set parameters for the bdev subsystem.
 
     Args:
         bdev_io_pool_size: number of bdev_io structures in shared buffer pool (optional)
         bdev_io_cache_size: maximum number of bdev_io structures cached per thread (optional)
         bdev_auto_examine: if set to false, the bdev layer will not examine every disks automatically (optional)
+        iobuf_small_cache_size: size of the small iobuf per thread cache
+        iobuf_large_cache_size: size of the large iobuf per thread cache
     """
     params = {}
 
@@ -21,6 +24,10 @@ def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None,
         params['bdev_io_cache_size'] = bdev_io_cache_size
     if bdev_auto_examine is not None:
         params["bdev_auto_examine"] = bdev_auto_examine
+    if iobuf_small_cache_size is not None:
+        params["iobuf_small_cache_size"] = iobuf_small_cache_size
+    if iobuf_large_cache_size is not None:
+        params["iobuf_large_cache_size"] = iobuf_large_cache_size
     return client.call('bdev_set_options', params)
 
 
@@ -395,7 +402,7 @@ def bdev_raid_get_bdevs(client, category):
     return client.call('bdev_raid_get_bdevs', params)
 
 
-def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None, uuid=None):
+def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None, uuid=None, superblock=False):
     """Create raid bdev. Either strip size arg will work but one is required.
 
     Args:
@@ -405,11 +412,13 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
         raid_level: raid level of raid bdev, supported values 0
         base_bdevs: Space separated names of Nvme bdevs in double quotes, like "Nvme0n1 Nvme1n1 Nvme2n1"
         uuid: UUID for this raid bdev (optional)
+        superblock: information about raid bdev will be stored in superblock on each base bdev,
+                    disabled by default due to backward compatibility
 
     Returns:
         None
     """
-    params = {'name': name, 'raid_level': raid_level, 'base_bdevs': base_bdevs}
+    params = {'name': name, 'raid_level': raid_level, 'base_bdevs': base_bdevs, 'superblock': superblock}
 
     if strip_size:
         params['strip_size'] = strip_size
@@ -577,7 +586,8 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
                           delay_cmd_submit=None, transport_retry_count=None, bdev_retry_count=None,
                           transport_ack_timeout=None, ctrlr_loss_timeout_sec=None, reconnect_delay_sec=None,
                           fast_io_fail_timeout_sec=None, disable_auto_failback=None, generate_uuids=None,
-                          transport_tos=None, nvme_error_stat=None, rdma_srq_size=None, io_path_stat=None):
+                          transport_tos=None, nvme_error_stat=None, rdma_srq_size=None, io_path_stat=None,
+                          allow_accel_sequence=None):
     """Set options for the bdev nvme. This is startup command.
 
     Args:
@@ -622,7 +632,8 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
         nvme_error_stat: Enable collecting NVMe error counts. (optional)
         rdma_srq_size: Set the size of a shared rdma receive queue. Default: 0 (disabled) (optional)
         io_path_stat: Enable collection I/O path stat of each io path. (optional)
-
+        allow_accel_sequence: Allow NVMe bdevs to advertise support for accel sequences if the
+        controller also supports them. (optional)
     """
     params = {}
 
@@ -701,6 +712,9 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
 
     if io_path_stat is not None:
         params['io_path_stat'] = io_path_stat
+
+    if allow_accel_sequence is not None:
+        params['allow_accel_sequence'] = allow_accel_sequence
 
     return client.call('bdev_nvme_set_options', params)
 
@@ -1357,12 +1371,13 @@ def bdev_iscsi_delete(client, name):
     return client.call('bdev_iscsi_delete', params)
 
 
-def bdev_passthru_create(client, base_bdev_name, name):
+def bdev_passthru_create(client, base_bdev_name, name, uuid=None):
     """Construct a pass-through block device.
 
     Args:
         base_bdev_name: name of the existing bdev
         name: name of block device
+        uuid: UUID of block device (optional)
 
     Returns:
         Name of created block device.
@@ -1371,6 +1386,8 @@ def bdev_passthru_create(client, base_bdev_name, name):
         'base_bdev_name': base_bdev_name,
         'name': name,
     }
+    if uuid:
+        params['uuid'] = uuid
     return client.call('bdev_passthru_create', params)
 
 
@@ -1599,6 +1616,17 @@ def bdev_ftl_get_stats(client, name):
     return client.call('bdev_ftl_get_stats', params)
 
 
+def bdev_ftl_get_properties(client, name):
+    """Get FTL properties
+
+    Args:
+        name: name of the bdev
+    """
+    params = {'name': name}
+
+    return client.call('bdev_ftl_get_properties', params)
+
+
 def bdev_get_bdevs(client, name=None, timeout=None):
     """Get information about block devices.
 
@@ -1672,14 +1700,15 @@ def bdev_get_histogram(client, name):
 
 
 def bdev_error_inject_error(client, name, io_type, error_type, num,
-                            corrupt_offset, corrupt_value):
+                            queue_depth, corrupt_offset, corrupt_value):
     """Inject an error via an error bdev.
 
     Args:
         name: name of error bdev
         io_type: one of "clear", "read", "write", "unmap", "flush", or "all"
-        error_type: one of "failure", "pending", or "corrupt_data"
+        error_type: one of "failure", "pending", "corrupt_data" or "nomem"
         num: number of commands to fail
+        queue_depth: the queue depth at which to trigger the error
         corrupt_offset: offset in bytes to xor with corrupt_value
         corrupt_value: value for xor (1-255, 0 is invalid)
     """
@@ -1691,6 +1720,8 @@ def bdev_error_inject_error(client, name, io_type, error_type, num,
 
     if num:
         params['num'] = num
+    if queue_depth:
+        params['queue_depth'] = queue_depth
     if corrupt_offset:
         params['corrupt_offset'] = corrupt_offset
     if corrupt_value:

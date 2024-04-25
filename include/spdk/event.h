@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation.  All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /**
@@ -142,8 +143,10 @@ struct spdk_app_opts {
 	 */
 	bool disable_signal_handlers;
 
-	/* Hole at bytes 185-191. */
-	uint8_t reserved185[7];
+	bool interrupt_mode;
+
+	/* Hole at bytes 186-191. */
+	uint8_t reserved186[6];
 
 	/**
 	 * The allocated size for the message pool used by the threading library.
@@ -168,8 +171,17 @@ struct spdk_app_opts {
 	 */
 	const char *lcore_map; /* lcore mapping */
 
+	/**
+	 * Log level for JSON RPC.
+	 */
+	enum spdk_log_level rpc_log_level;
+
+	/**
+	 * If non-NULL, a pointer to JSON RPC log file.
+	 */
+	FILE *rpc_log_file;
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 224, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 236, "Incorrect size");
 
 /**
  * Initialize the default value of opts
@@ -277,11 +289,13 @@ typedef enum spdk_app_parse_args_rvals spdk_app_parse_args_rvals_t;
  * \param argv Array of command line arguments.
  * \param opts Default options for the application.
  * \param getopt_str String representing the app-specific command line parameters.
- * Characters in this string must not conflict with characters in SPDK_APP_GETOPT_STRING.
- * \param app_long_opts Array of full-name parameters. Can be NULL.
+ *        Characters in this string must not conflict with characters in SPDK_APP_GETOPT_STRING.
+ *        This argument is optional.
+ * \param app_long_opts Array of full-name parameters. This argument is optional.
  * \param parse Function pointer to call if an argument in getopt_str is found.
+ *        This argument is optional but only if getopt_str is not provided.
  * \param usage Function pointer to print usage messages for app-specific command
- *		line parameters.
+ *        line parameters. This argument is optional.
  *\return SPDK_APP_PARSE_ARGS_FAIL on failure, SPDK_APP_PARSE_ARGS_SUCCESS on
  *        success, SPDK_APP_PARSE_ARGS_HELP if '-h' passed as an option.
  */

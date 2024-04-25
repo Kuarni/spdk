@@ -160,6 +160,7 @@ struct ns_worker_ctx {
 	TAILQ_HEAD(, perf_task)		queued_tasks;
 
 	struct spdk_histogram_data	*histogram;
+	int				status;
 };
 
 struct perf_task {
@@ -941,7 +942,10 @@ nvme_submit_io(struct perf_task *task, struct ns_worker_ctx *ns_ctx,
 static void
 perf_disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx)
 {
+	struct ns_worker_ctx *ns_ctx = ctx;
 
+	ns_ctx->is_draining = true;
+	ns_ctx->status = 1;
 }
 
 static int64_t
@@ -992,6 +996,7 @@ nvme_verify_io(struct perf_task *task, struct ns_entry *entry)
 static int
 nvme_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 {
+	const struct spdk_nvme_ctrlr_opts *ctrlr_opts;
 	struct spdk_nvme_io_qpair_opts opts;
 	struct ns_entry *entry = ns_ctx->entry;
 	struct spdk_nvme_poll_group *group;
@@ -1012,9 +1017,13 @@ nvme_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 	}
 	opts.delay_cmd_submit = true;
 	opts.create_only = true;
-	opts.async_mode = true;
 
-	ns_ctx->u.nvme.group = spdk_nvme_poll_group_create(NULL, NULL);
+	ctrlr_opts = spdk_nvme_ctrlr_get_opts(entry->u.nvme.ctrlr);
+	opts.async_mode = !(spdk_nvme_ctrlr_get_transport_id(entry->u.nvme.ctrlr)->trtype ==
+			    SPDK_NVME_TRANSPORT_PCIE
+			    && ns_ctx->u.nvme.num_all_qpairs > ctrlr_opts->admin_queue_size);
+
+	ns_ctx->u.nvme.group = spdk_nvme_poll_group_create(ns_ctx, NULL);
 	if (ns_ctx->u.nvme.group == NULL) {
 		goto poll_group_failed;
 	}
@@ -1275,9 +1284,9 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	 */
 	entries = (g_io_size_bytes - 1) / max_xfer_size + 2;
 	if ((g_queue_depth * entries) > opts.io_queue_size) {
-		printf("controller IO queue size %u less than required\n",
+		printf("Controller IO queue size %u, less than required.\n",
 		       opts.io_queue_size);
-		printf("Consider using lower queue depth or small IO size because "
+		printf("Consider using lower queue depth or smaller IO size, because "
 		       "IO requests may be queued at the NVMe driver.\n");
 	}
 	/* For requests which have children requests, parent request itself
@@ -1565,11 +1574,14 @@ io_complete(void *ctx, const struct spdk_nvme_cpl *cpl)
 			RATELIMIT_LOG("Write completed with error (sct=%d, sc=%d)\n",
 				      cpl->status.sct, cpl->status.sc);
 		}
-		if (!g_continue_on_error &&
-		    cpl->status.sct == SPDK_NVME_SCT_GENERIC &&
-		    cpl->status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT) {
-			/* The namespace was hotplugged.  Stop trying to send I/O to it. */
-			task->ns_ctx->is_draining = true;
+		if (!g_continue_on_error) {
+			if (cpl->status.sct == SPDK_NVME_SCT_GENERIC &&
+			    cpl->status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT) {
+				/* The namespace was hotplugged.  Stop trying to send I/O to it. */
+				task->ns_ctx->is_draining = true;
+			}
+
+			task->ns_ctx->status = 1;
 		}
 	}
 
@@ -1706,6 +1718,7 @@ work_fn(void *arg)
 			printf("ERROR: init_ns_worker_ctx() failed\n");
 			/* Wait on barrier to avoid blocking of successful workers */
 			pthread_barrier_wait(&g_worker_sync_barrier);
+			ns_ctx->status = 1;
 			return 1;
 		}
 	}
@@ -1713,6 +1726,7 @@ work_fn(void *arg)
 	rc = pthread_barrier_wait(&g_worker_sync_barrier);
 	if (rc != 0 && rc != PTHREAD_BARRIER_SERIAL_THREAD) {
 		printf("ERROR: failed to wait on thread sync barrier\n");
+		ns_ctx->status = 1;
 		return 1;
 	}
 
@@ -3157,6 +3171,7 @@ main(int argc, char **argv)
 {
 	int rc;
 	struct worker_thread *worker, *main_worker;
+	struct ns_worker_ctx *ns_ctx;
 	struct spdk_env_opts opts;
 	pthread_t thread_id = 0;
 
@@ -3258,7 +3273,7 @@ main(int argc, char **argv)
 	}
 
 	assert(main_worker != NULL);
-	rc = work_fn(main_worker);
+	work_fn(main_worker);
 
 	spdk_env_thread_wait_all();
 
@@ -3270,6 +3285,21 @@ cleanup:
 	if (thread_id && pthread_cancel(thread_id) == 0) {
 		pthread_join(thread_id, NULL);
 	}
+
+	/* Collect errors from all workers and namespaces */
+	TAILQ_FOREACH(worker, &g_workers, link) {
+		if (rc != 0) {
+			break;
+		}
+
+		TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
+			if (ns_ctx->status != 0) {
+				rc = ns_ctx->status;
+				break;
+			}
+		}
+	}
+
 	unregister_trids();
 	unregister_namespaces();
 	unregister_controllers();

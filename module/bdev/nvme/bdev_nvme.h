@@ -43,13 +43,16 @@ struct nvme_ctrlr_opts {
 	uint32_t reconnect_delay_sec;
 	uint32_t fast_io_fail_timeout_sec;
 	bool from_discovery_service;
+	/* Path to the file containing PSK, used for dumping configuration. */
+	char psk_path[PATH_MAX];
 };
 
 struct nvme_async_probe_ctx {
 	struct spdk_nvme_probe_ctx *probe_ctx;
 	const char *base_name;
 	const char **names;
-	uint32_t count;
+	uint32_t max_bdevs;
+	uint32_t reported_bdevs;
 	struct spdk_poller *poller;
 	struct spdk_nvme_transport_id trid;
 	struct nvme_ctrlr_opts bdev_opts;
@@ -293,6 +296,7 @@ struct spdk_bdev_nvme_opts {
 	bool nvme_error_stat;
 	uint32_t rdma_srq_size;
 	bool io_path_stat;
+	bool allow_accel_sequence;
 };
 
 struct spdk_nvme_qpair *bdev_nvme_get_io_qpair(struct spdk_io_channel *ctrlr_io_ch);
@@ -330,15 +334,23 @@ void bdev_nvme_mdns_discovery_config_json(struct spdk_json_write_ctx *w);
 
 struct spdk_nvme_ctrlr *bdev_nvme_get_ctrlr(struct spdk_bdev *bdev);
 
+typedef void (*bdev_nvme_delete_done_fn)(void *ctx, int rc);
+
 /**
  * Delete NVMe controller with all bdevs on top of it, or delete the specified path
  * if there is any alternative path. Requires to pass name of NVMe controller.
  *
  * \param name NVMe controller name
  * \param path_id The specified path to remove (optional)
- * \return zero on success, -EINVAL on wrong parameters or -ENODEV if controller is not found
+ * \param delete_done Callback function on delete complete (optional)
+ * \param delete_done_ctx Context passed to callback (optional)
+ * \return zero on success,
+ *		-EINVAL on wrong parameters or
+ *		-ENODEV if controller is not found or
+ *		-ENOMEM on no memory
  */
-int bdev_nvme_delete(const char *name, const struct nvme_path_id *path_id);
+int bdev_nvme_delete(const char *name, const struct nvme_path_id *path_id,
+		     bdev_nvme_delete_done_fn delete_done, void *delete_done_ctx);
 
 enum nvme_ctrlr_op {
 	NVME_CTRLR_OP_RESET = 1,

@@ -152,6 +152,32 @@ struct spdk_nvmf_poll_group_stat {
 typedef void (*spdk_nvmf_tgt_subsystem_listen_done_fn)(void *ctx, int status);
 
 /**
+ * Add a discovery service referral to an NVMe-oF target
+ *
+ * \param tgt The target to which the referral will be added
+ * \param trid Transport ID of the referral
+ * \param secure_channel The referral describes a discovery service which
+ * requires a secure channel
+ *
+ * \return 0 on success or a negated errno on failure
+ */
+int spdk_nvmf_tgt_add_referral(struct spdk_nvmf_tgt *tgt,
+			       struct spdk_nvme_transport_id *trid,
+			       bool secure_channel);
+
+/**
+ * Remove a discovery service referral from an NVMeoF target
+ *
+ * \param tgt The target from which the referral will be removed
+ * \param trid Transport ID of the referral to remove
+ *
+ * \return 0 on success or a negated errno on failure.
+ */
+int spdk_nvmf_tgt_remove_referral(struct spdk_nvmf_tgt *tgt,
+				  struct spdk_nvme_transport_id *trid);
+
+
+/**
  * Construct an NVMe-oF target.
  *
  * \param opts a pointer to an spdk_nvmf_target_opts structure.
@@ -300,8 +326,8 @@ typedef void (*nvmf_qpair_disconnect_cb)(void *ctx);
  * Disconnect an NVMe-oF qpair
  *
  * \param qpair The NVMe-oF qpair to disconnect.
- * \param cb_fn Deprecated, will be removed in v23.09. The function to call upon completion of the disconnect.
- * \param ctx Deprecated, will be removed in v23.09. The context to pass to the callback function.
+ * \param cb_fn Deprecated, will be removed in v24.01. The function to call upon completion of the disconnect.
+ * \param ctx Deprecated, will be removed in v24.01. The context to pass to the callback function.
  *
  * \return 0 upon success.
  * \return -ENOMEM if the function specific context could not be allocated.
@@ -632,6 +658,48 @@ void spdk_nvmf_subsystem_add_listener(struct spdk_nvmf_subsystem *subsystem,
 				      spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn,
 				      void *cb_arg);
 
+/* Additional options for listener creation. */
+struct spdk_nvmf_listener_opts {
+	/**
+	 * The size of spdk_nvmf_listener_opts according to the caller of this library is used for
+	 * ABI compatibility. The library uses this field to know how many fields in this structure
+	 * are valid. And the library will populate any remaining fields with default values.
+	 * New added fields should be put at the end of the struct.
+	 */
+	size_t opts_size;
+
+	/* Secure channel parameter used in TCP TLS. */
+	bool secure_channel;
+} __attribute__((packed));
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_listener_opts) == 9, "Incorrect size");
+
+/**
+ * Initialize options structure for listener creation.
+ *
+ * \param opts Options structure to initialize.
+ * \param size Size of the structure.
+ */
+void spdk_nvmf_subsystem_listener_opts_init(struct spdk_nvmf_listener_opts *opts, size_t size);
+
+/**
+ * Accept new connections on the address provided.
+ *
+ * This does not start the listener. Use spdk_nvmf_tgt_listen_ext() for that.
+ *
+ * May only be performed on subsystems in the PAUSED or INACTIVE states.
+ * No namespaces are required to be paused.
+ *
+ * \param subsystem Subsystem to add listener to.
+ * \param trid The address to accept connections from.
+ * \param cb_fn A callback that will be called once the association is complete.
+ * \param cb_arg Argument passed to cb_fn.
+ * \param opts NULL or options requested for listener creation.
+ */
+void spdk_nvmf_subsystem_add_listener_ext(struct spdk_nvmf_subsystem *subsystem,
+		struct spdk_nvme_transport_id *trid,
+		spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn,
+		void *cb_arg, struct spdk_nvmf_listener_opts *opts);
+
 /**
  * Remove the listener from subsystem.
  *
@@ -710,12 +778,26 @@ void spdk_nvmf_subsystem_allow_any_listener(
 /**
  * Check whether a subsystem allows any listen address or only addresses in the allowed list.
  *
+ * Deprecated - will be removed in 24.01. Please use
+ * \ref spdk_nvmf_subsystem_any_listener_allowed.
+ *
  * \param subsystem Subsystem to query.
  *
  * \return true if this subsystem allows dynamic management of listen address list,
  *  or false if only allows addresses in the list configured during subsystem setup.
  */
 bool spdk_nvmf_subsytem_any_listener_allowed(
+	struct spdk_nvmf_subsystem *subsystem);
+
+/**
+ * Check whether a subsystem allows any listen address or only addresses in the allowed list.
+ *
+ * \param subsystem Subsystem to query.
+ *
+ * \return true if this subsystem allows dynamic management of listen address list,
+ *  or false if only allows addresses in the list configured during subsystem setup.
+ */
+bool spdk_nvmf_subsystem_any_listener_allowed(
 	struct spdk_nvmf_subsystem *subsystem);
 
 /**
@@ -978,6 +1060,17 @@ enum spdk_nvmf_subtype spdk_nvmf_subsystem_get_type(struct spdk_nvmf_subsystem *
  * \return maximum namespace id
  */
 uint32_t spdk_nvmf_subsystem_get_max_nsid(struct spdk_nvmf_subsystem *subsystem);
+
+/**
+ * Checks whether a given subsystem is a discovery subsystem
+ *
+ * \param subsystem Subsystem to check.
+ *
+ * \return true if a given subsystem is a discovery subsystem, false
+ *	   if the subsystem is an nvm subsystem
+ */
+bool spdk_nvmf_subsystem_is_discovery(struct spdk_nvmf_subsystem *subsystem);
+
 
 /**
  * Initialize transport options

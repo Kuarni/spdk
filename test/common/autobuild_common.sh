@@ -308,7 +308,7 @@ test_make_uninstall() {
 	# Create empty file to check if it is not deleted by target uninstall
 	touch "$SPDK_WORKSPACE/usr/lib/sample_xyz.a"
 	$MAKE $MAKEFLAGS uninstall DESTDIR="$SPDK_WORKSPACE" prefix=/usr
-	if [[ $(find "$SPDK_WORKSPACE/usr" -maxdepth 1 -mindepth 1 | wc -l) -ne 2 ]] || [[ $(find "$SPDK_WORKSPACE/usr/lib/" -maxdepth 1 -mindepth 1 | wc -l) -ne 1 ]]; then
+	if [[ $(find "$SPDK_WORKSPACE/usr" -maxdepth 1 -mindepth 1 | wc -l) -ne 3 ]] || [[ $(find "$SPDK_WORKSPACE/usr/lib/" -maxdepth 1 -mindepth 1 | wc -l) -ne 1 ]]; then
 		ls -lR "$SPDK_WORKSPACE"
 		echo "Make uninstall failed"
 		exit 1
@@ -357,7 +357,7 @@ check_format() {
 }
 
 check_so_deps() {
-	run_test "autobuild_check_so_deps" "$rootdir/test/make/check_so_deps.sh" "$spdk_conf"
+	run_test "autobuild_check_so_deps" "$rootdir/test/make/check_so_deps.sh" -c "$spdk_conf" -a "$SPDK_ABI_DIR"
 }
 
 external_code() {
@@ -375,6 +375,8 @@ build_files() {
 	run_test "autobuild_header_dependency_check" header_dependency_check
 	run_test "autobuild_make_install" test_make_install
 	run_test "autobuild_make_uninstall" test_make_uninstall
+	$MAKE clean
+	run_test "autobuild_generated_files_check_post_clean" porcelain_check
 }
 
 build_doc() {

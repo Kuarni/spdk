@@ -29,7 +29,7 @@ To run the scripts in your environment please follow steps below.
   option in Target and Initiator configuration sections.
 - `sysstat` package must be installed for SAR CPU utilization measurements.
 - `bwm-ng` package must be installed for NIC bandwidth utilization measurements.
-- `pcm` package must be installed for pcm, pcm-power and pcm-memory measurements.
+- `pcm` package must be installed for pcm CPU measurements.
 
 ### Optional
 
@@ -60,7 +60,8 @@ The following sub-chapters describe each configuration section in more detail.
     "password": "password",
     "transport": "transport_type",
     "skip_spdk_install": bool,
-    "irdma_roce_enable": bool
+    "irdma_roce_enable": bool,
+    "pause_frames": bool
 }
 ```
 
@@ -79,6 +80,9 @@ Optional:
   Default: false.
 - irdma_roce_enable - loads irdma driver with RoCEv2 network protocol enabled on Target and
   Initiator machines. This option applies only to system with Intel E810 NICs.
+  Default: false
+- pause_frames - configures pause frames when RoCEv2 network protocol is enabled on Target and
+  Initiator machines.
   Default: false
 
 ### Target System Configuration
@@ -129,7 +133,7 @@ Optional, common:
   fio "run_time" duration. Default: enabled.
 - pcm_settings - bool
   Enable [PCM](https://github.com/opcm/pcm.git) measurements on Target side.
-  Measurements include CPU, memory and power consumption. Default: enabled.
+  Measurements include only CPU consumption. Default: enabled.
 - enable_bandwidth - bool. Measure bandwidth utilization on network
   interfaces. Default: enabled.
 - tuned_profile - tunedadm profile to apply on the system before starting
@@ -152,6 +156,9 @@ Optional, common:
     of both ("[0-1,10,20-22]")
   exclude_cpulist: reverse the effect of cpulist mode. Allow IRQ processing
     only on CPU cores which are not provided in cpulist parameter.
+- sock_impl - str. Specifies the socket implementation to be used. This could be 'posix' for
+  the POSIX socket interfaces, or 'uring' for the Linux io_uring interface.
+  Default: posix
 
 Optional, Kernel Target only:
 

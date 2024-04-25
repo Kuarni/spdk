@@ -74,6 +74,10 @@ malloc_verify_pi(struct spdk_bdev_io *bdev_io)
 			.iov_len	= bdev_io->u.bdev.num_blocks * bdev->md_len,
 		};
 
+		if (bdev_io->u.bdev.md_buf == NULL) {
+			return 0;
+		}
+
 		rc = spdk_dix_verify(bdev_io->u.bdev.iovs,
 				     bdev_io->u.bdev.iovcnt,
 				     &md_iov,
@@ -92,6 +96,62 @@ malloc_verify_pi(struct spdk_bdev_io *bdev_io)
 			    err_blk.actual,
 			    err_blk.err_offset);
 	}
+
+	return rc;
+}
+
+static int
+malloc_unmap_write_zeroes_generate_pi(struct spdk_bdev_io *bdev_io)
+{
+	struct spdk_bdev *bdev = bdev_io->bdev;
+	struct malloc_disk *mdisk = bdev_io->bdev->ctxt;
+	uint32_t block_size = bdev_io->bdev->blocklen;
+	struct spdk_dif_ctx dif_ctx;
+	struct spdk_dif_ctx_init_ext_opts dif_opts;
+	int rc;
+
+	dif_opts.size = SPDK_SIZEOF(&dif_opts, dif_pi_format);
+	dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
+	rc = spdk_dif_ctx_init(&dif_ctx,
+			       bdev->blocklen,
+			       bdev->md_len,
+			       bdev->md_interleave,
+			       bdev->dif_is_head_of_md,
+			       bdev->dif_type,
+			       bdev->dif_check_flags,
+			       SPDK_DIF_REFTAG_IGNORE,
+			       0xFFFF, SPDK_DIF_APPTAG_IGNORE,
+			       0, 0, &dif_opts);
+	if (rc != 0) {
+		SPDK_ERRLOG("Initialization of DIF/DIX context failed\n");
+		return rc;
+	}
+
+	if (bdev->md_interleave) {
+		struct iovec iov = {
+			.iov_base	= mdisk->malloc_buf + bdev_io->u.bdev.offset_blocks * block_size,
+			.iov_len	= bdev_io->u.bdev.num_blocks * block_size,
+		};
+
+		rc = spdk_dif_generate(&iov, 1, bdev_io->u.bdev.num_blocks, &dif_ctx);
+	} else {
+		struct iovec iov = {
+			.iov_base	= mdisk->malloc_buf + bdev_io->u.bdev.offset_blocks * block_size,
+			.iov_len	= bdev_io->u.bdev.num_blocks * block_size,
+		};
+
+		struct iovec md_iov = {
+			.iov_base	= mdisk->malloc_md_buf + bdev_io->u.bdev.offset_blocks * bdev->md_len,
+			.iov_len	= bdev_io->u.bdev.num_blocks * bdev->md_len,
+		};
+
+		rc = spdk_dix_generate(&iov, 1, &md_iov, bdev_io->u.bdev.num_blocks, &dif_ctx);
+	}
+
+	if (rc != 0) {
+		SPDK_ERRLOG("Formatting by DIF/DIX failed\n");
+	}
+
 
 	return rc;
 }
@@ -121,6 +181,15 @@ malloc_done(void *ref, int status)
 	    bdev_io->type == SPDK_BDEV_IO_TYPE_READ &&
 	    task->status == SPDK_BDEV_IO_STATUS_SUCCESS) {
 		rc = malloc_verify_pi(bdev_io);
+		if (rc != 0) {
+			task->status = SPDK_BDEV_IO_STATUS_FAILED;
+		}
+	}
+
+	if (bdev_io->bdev->dif_type != SPDK_DIF_DISABLE &&
+	    (bdev_io->type == SPDK_BDEV_IO_TYPE_UNMAP || bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE_ZEROES) &&
+	    task->status == SPDK_BDEV_IO_STATUS_SUCCESS) {
+		rc = malloc_unmap_write_zeroes_generate_pi(bdev_io);
 		if (rc != 0) {
 			task->status = SPDK_BDEV_IO_STATUS_FAILED;
 		}
@@ -494,8 +563,6 @@ bdev_malloc_get_io_channel(void *ctx)
 static void
 bdev_malloc_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 {
-	char uuid_str[SPDK_UUID_STRING_LEN];
-
 	spdk_json_write_object_begin(w);
 
 	spdk_json_write_named_string(w, "method", "bdev_malloc_create");
@@ -505,8 +572,7 @@ bdev_malloc_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx
 	spdk_json_write_named_uint64(w, "num_blocks", bdev->blockcnt);
 	spdk_json_write_named_uint32(w, "block_size", bdev->blocklen);
 	spdk_json_write_named_uint32(w, "physical_block_size", bdev->phys_blocklen);
-	spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &bdev->uuid);
-	spdk_json_write_named_string(w, "uuid", uuid_str);
+	spdk_json_write_named_uuid(w, "uuid", &bdev->uuid);
 	spdk_json_write_named_uint32(w, "optimal_io_boundary", bdev->optimal_io_boundary);
 
 	spdk_json_write_object_end(w);
@@ -576,6 +642,7 @@ malloc_disk_setup_pi(struct malloc_disk *mdisk)
 
 	dif_opts.size = SPDK_SIZEOF(&dif_opts, dif_pi_format);
 	dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
+	/* Set APPTAG|REFTAG_IGNORE to PI fields after creation of malloc bdev */
 	rc = spdk_dif_ctx_init(&dif_ctx,
 			       bdev->blocklen,
 			       bdev->md_len,
@@ -583,8 +650,9 @@ malloc_disk_setup_pi(struct malloc_disk *mdisk)
 			       bdev->dif_is_head_of_md,
 			       bdev->dif_type,
 			       bdev->dif_check_flags,
-			       0,	/* configure the whole buffers */
-			       0, 0, 0, 0, &dif_opts);
+			       SPDK_DIF_REFTAG_IGNORE,
+			       0xFFFF, SPDK_DIF_APPTAG_IGNORE,
+			       0, 0, &dif_opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("Initialization of DIF/DIX context failed\n");
 		return rc;

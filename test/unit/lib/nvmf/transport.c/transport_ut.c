@@ -3,7 +3,7 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "common/lib/test_iobuf.c"
 #include "nvmf/transport.c"
@@ -80,8 +80,6 @@ DEFINE_STUB(rdma_get_dst_port, __be16, (struct rdma_cm_id *id), 0);
 DEFINE_STUB(rdma_get_src_port, __be16, (struct rdma_cm_id *id), 0);
 DEFINE_STUB(spdk_nvmf_qpair_get_listen_trid, int, (struct spdk_nvmf_qpair *qpair,
 		struct spdk_nvme_transport_id *trid), 0);
-DEFINE_STUB(ibv_reg_mr_iova2, struct ibv_mr *, (struct ibv_pd *pd, void *addr, size_t length,
-		uint64_t iova, unsigned int access), NULL);
 DEFINE_STUB(spdk_nvme_transport_id_adrfam_str, const char *, (enum spdk_nvmf_adrfam adrfam), NULL);
 DEFINE_STUB_V(ut_opts_init, (struct spdk_nvmf_transport_opts *opts));
 DEFINE_STUB(ut_transport_listen, int, (struct spdk_nvmf_transport *transport,
@@ -153,9 +151,25 @@ test_spdk_nvmf_transport_create(void)
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(transport == NULL);
 
-	/* Create transport successfully */
 	spdk_nvmf_transport_register(&ops);
 
+	/* Ensure io_unit_size cannot be set to 0 */
+	g_rdma_ut_transport_opts.io_unit_size = 0;
+	rc = spdk_nvmf_transport_create_async("new_ops", &g_rdma_ut_transport_opts,
+					      test_nvmf_create_transport_done, &transport);
+	CU_ASSERT(rc != 0);
+	CU_ASSERT(transport == NULL);
+
+	/* Ensure io_unit_size cannot be larger than large_bufsize */
+	g_rdma_ut_transport_opts.io_unit_size = opts_iobuf.large_bufsize * 2;
+	rc = spdk_nvmf_transport_create_async("new_ops", &g_rdma_ut_transport_opts,
+					      test_nvmf_create_transport_done, &transport);
+	CU_ASSERT(rc != 0);
+	CU_ASSERT(transport == NULL);
+
+	g_rdma_ut_transport_opts.io_unit_size = SPDK_NVMF_RDMA_MIN_IO_BUFFER_SIZE;
+
+	/* Create transport successfully */
 	rc = spdk_nvmf_transport_create_async("new_ops", &g_rdma_ut_transport_opts,
 					      test_nvmf_create_transport_done, &transport);
 	CU_ASSERT(rc == 0);
@@ -372,7 +386,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -382,9 +395,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_spdk_nvmf_transport_opts_init);
 	CU_ADD_TEST(suite, test_spdk_nvmf_transport_listen_ext);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

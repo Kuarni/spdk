@@ -137,12 +137,12 @@ _process_single_task(struct spdk_io_channel *ch, struct spdk_accel_task *task)
 	}
 
 	switch (task->op_code) {
-	case ACCEL_OPC_COMPRESS:
+	case SPDK_ACCEL_OPC_COMPRESS:
 		rc = spdk_idxd_submit_compress(chan->chan, task->d.iovs[0].iov_base, task->d.iovs[0].iov_len,
 					       task->s.iovs, task->s.iovcnt, task->output_size, flags,
 					       iaa_done, idxd_task);
 		break;
-	case ACCEL_OPC_DECOMPRESS:
+	case SPDK_ACCEL_OPC_DECOMPRESS:
 		rc = spdk_idxd_submit_decompress(chan->chan, task->d.iovs, task->d.iovcnt, task->s.iovs,
 						 task->s.iovcnt, flags, iaa_done, idxd_task);
 		break;
@@ -244,15 +244,15 @@ accel_iaa_get_ctx_size(void)
 }
 
 static bool
-iaa_supports_opcode(enum accel_opcode opc)
+iaa_supports_opcode(enum spdk_accel_opcode opc)
 {
 	if (!g_iaa_initialized) {
 		return false;
 	}
 
 	switch (opc) {
-	case ACCEL_OPC_COMPRESS:
-	case ACCEL_OPC_DECOMPRESS:
+	case SPDK_ACCEL_OPC_COMPRESS:
+	case SPDK_ACCEL_OPC_DECOMPRESS:
 		return true;
 	default:
 		return false;
@@ -368,7 +368,6 @@ accel_iaa_init(void)
 	}
 
 	g_iaa_initialized = true;
-	SPDK_NOTICELOG("Accel framework IAA module initialized.\n");
 	spdk_io_device_register(&g_iaa_module, idxd_create_cb, idxd_destroy_cb,
 				sizeof(struct idxd_io_channel), "iaa_accel_module");
 	return 0;

@@ -6,7 +6,7 @@
 #include "spdk/stdinc.h"
 
 #include "common/lib/ut_multithread.c"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/nvmf.h"
 #include "spdk_internal/mock.h"
 
@@ -558,7 +558,6 @@ ut_reservation_build_req(uint32_t length)
 
 	spdk_iov_one(req->iov, &req->iovcnt, calloc(1, length), length);
 	assert(req->iov[0].iov_base != NULL);
-	req->data = req->iov[0].iov_base;
 	req->length = length;
 
 	req->cmd = (union nvmf_h2c_msg *)calloc(1, sizeof(union nvmf_h2c_msg));
@@ -1467,7 +1466,10 @@ test_spdk_nvmf_subsystem_add_host(void)
 	int rc;
 	const char hostnqn[] = "nqn.2016-06.io.spdk:host1";
 	const char subsystemnqn[] = "nqn.2016-06.io.spdk:subsystem1";
-	struct spdk_nvmf_transport_opts opts = {.opts_size = 1};
+	struct spdk_nvmf_transport_opts opts = {
+		.opts_size = sizeof(struct spdk_nvmf_transport_opts),
+		.io_unit_size = 8192
+	};
 	const struct spdk_nvmf_transport_ops test_ops = {
 		.name = "transport_ut",
 		.create = transport_create,
@@ -1534,7 +1536,6 @@ test_nvmf_ns_reservation_report(void)
 
 	req.length = sizeof(*status_data) + sizeof(*ctrlr_data) * 2;
 	spdk_iov_one(req.iov, &req.iovcnt, data, req.length);
-	req.data = req.iov[0].iov_base;
 
 	req.cmd = &cmd;
 	req.rsp = &rsp;
@@ -1728,7 +1729,7 @@ test_nvmf_subsystem_state_change(void)
 	RB_INIT(&tgt.subsystems);
 
 	discovery_subsystem = spdk_nvmf_subsystem_create(&tgt, SPDK_NVMF_DISCOVERY_NQN,
-			      SPDK_NVMF_SUBTYPE_DISCOVERY, 0);
+			      SPDK_NVMF_SUBTYPE_DISCOVERY_CURRENT, 0);
 	SPDK_CU_ASSERT_FATAL(discovery_subsystem != NULL);
 	subsystem = spdk_nvmf_subsystem_create(&tgt, "nqn.2016-06.io.spdk:subsystem1",
 					       SPDK_NVMF_SUBTYPE_NVME, 0);
@@ -1782,7 +1783,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -1812,9 +1812,7 @@ main(int argc, char **argv)
 	allocate_threads(1);
 	set_thread(0);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	free_threads();

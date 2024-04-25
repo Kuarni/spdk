@@ -47,6 +47,8 @@ rpc_error_bdev_decode_error_type(const struct spdk_json_val *val, void *out)
 		*error_type = VBDEV_IO_PENDING;
 	} else if (spdk_json_strequal(val, "corrupt_data") == true) {
 		*error_type = VBDEV_IO_CORRUPT_DATA;
+	} else if (spdk_json_strequal(val, "nomem") == true) {
+		*error_type = VBDEV_IO_NOMEM;
 	} else {
 		SPDK_NOTICELOG("Invalid parameter value: error_type\n");
 		return -EINVAL;
@@ -57,19 +59,18 @@ rpc_error_bdev_decode_error_type(const struct spdk_json_val *val, void *out)
 
 struct rpc_bdev_error_create {
 	char *base_name;
-	char *uuid;
+	struct spdk_uuid uuid;
 };
 
 static void
 free_rpc_bdev_error_create(struct rpc_bdev_error_create *req)
 {
 	free(req->base_name);
-	free(req->uuid);
 }
 
 static const struct spdk_json_object_decoder rpc_bdev_error_create_decoders[] = {
 	{"base_name", offsetof(struct rpc_bdev_error_create, base_name), spdk_json_decode_string},
-	{"uuid", offsetof(struct rpc_bdev_error_create, uuid), spdk_json_decode_string, true},
+	{"uuid", offsetof(struct rpc_bdev_error_create, uuid), spdk_json_decode_uuid, true},
 };
 
 static void
@@ -77,8 +78,6 @@ rpc_bdev_error_create(struct spdk_jsonrpc_request *request,
 		      const struct spdk_json_val *params)
 {
 	struct rpc_bdev_error_create req = {};
-	struct spdk_uuid *uuid = NULL;
-	struct spdk_uuid decoded_uuid;
 	int rc = 0;
 
 	if (spdk_json_decode_object(params, rpc_bdev_error_create_decoders,
@@ -90,16 +89,7 @@ rpc_bdev_error_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	if (req.uuid) {
-		if (spdk_uuid_parse(&decoded_uuid, req.uuid)) {
-			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-							 "Failed to parse bdev UUID");
-			goto cleanup;
-		}
-		uuid = &decoded_uuid;
-	}
-
-	rc = vbdev_error_create(req.base_name, uuid);
+	rc = vbdev_error_create(req.base_name, &req.uuid);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
@@ -169,6 +159,7 @@ static const struct spdk_json_object_decoder rpc_error_information_decoders[] = 
 	{"io_type", offsetof(struct rpc_error_information, opts.io_type), rpc_error_bdev_decode_io_type},
 	{"error_type", offsetof(struct rpc_error_information, opts.error_type), rpc_error_bdev_decode_error_type},
 	{"num", offsetof(struct rpc_error_information, opts.error_num), spdk_json_decode_uint32, true},
+	{"queue_depth", offsetof(struct rpc_error_information, opts.error_qd), spdk_json_decode_uint64, true},
 	{"corrupt_offset", offsetof(struct rpc_error_information, opts.corrupt_offset), spdk_json_decode_uint64, true},
 	{"corrupt_value", offsetof(struct rpc_error_information, opts.corrupt_value), spdk_json_decode_uint8, true},
 };

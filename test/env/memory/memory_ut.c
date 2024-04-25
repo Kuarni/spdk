@@ -8,7 +8,7 @@
 #define UNIT_TEST_NO_VTOPHYS
 #define UNIT_TEST_NO_PCI_ADDR
 #include "common/lib/test_env.c"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "spdk/bit_array.h"
 
@@ -503,9 +503,7 @@ main(int argc, char **argv)
 		return CU_get_error();
 	}
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	spdk_bit_array_free(&g_page_array);

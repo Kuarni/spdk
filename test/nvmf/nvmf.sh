@@ -23,6 +23,7 @@ if [[ $SPDK_TEST_URING -eq 0 ]]; then
 	run_test "nvmf_example" $rootdir/test/nvmf/target/nvmf_example.sh "${TEST_ARGS[@]}"
 	run_test "nvmf_filesystem" $rootdir/test/nvmf/target/filesystem.sh "${TEST_ARGS[@]}"
 	run_test "nvmf_discovery" $rootdir/test/nvmf/target/discovery.sh "${TEST_ARGS[@]}"
+	run_test "nvmf_referrals" $rootdir/test/nvmf/target/referrals.sh "${TEST_ARGS[@]}"
 	run_test "nvmf_connect_disconnect" $rootdir/test/nvmf/target/connect_disconnect.sh "${TEST_ARGS[@]}"
 	run_test "nvmf_multitarget" $rootdir/test/nvmf/target/multitarget.sh "${TEST_ARGS[@]}"
 	run_test "nvmf_rpc" $rootdir/test/nvmf/target/rpc.sh "${TEST_ARGS[@]}"
@@ -66,7 +67,8 @@ if [[ $NET_TYPE == phy ]]; then
 		if ((${#TCP_INTERFACE_LIST[@]} > 0)); then
 			run_test "nvmf_perf_adq" $rootdir/test/nvmf/target/perf_adq.sh "${TEST_ARGS[@]}"
 		fi
-	else
+	elif [[ $RUN_NIGTLY -eq 1 ]]; then
+		# FIXME: For now, lock this test suite under nightly due to https://github.com/spdk/spdk/issues/3116
 		run_test "nvmf_device_removal" test/nvmf/target/device_removal.sh "${TEST_ARGS[@]}"
 	fi
 	run_test "nvmf_shutdown" $rootdir/test/nvmf/target/shutdown.sh "${TEST_ARGS[@]}"
@@ -97,6 +99,7 @@ run_test "nvmf_discovery_remove_ifc" $rootdir/test/nvmf/host/discovery_remove_if
 if [[ $SPDK_TEST_NVMF_MDNS -eq 1 && "$SPDK_TEST_NVMF_TRANSPORT" == "tcp" ]]; then
 	# Skipping tests on RDMA because the rdma stack fails to configure the same IP for host and target.
 	run_test "nvmf_mdns_discovery" $rootdir/test/nvmf/host/mdns_discovery.sh "${TEST_ARGS[@]}"
+	run_test "nvmf_digest" "$rootdir/test/nvmf/host/digest.sh" "${TEST_ARGS[@]}"
 fi
 
 if [[ $SPDK_TEST_USDT -eq 1 ]]; then

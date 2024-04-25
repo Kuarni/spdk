@@ -1554,4 +1554,45 @@ spdk_nvme_connect_async(const struct spdk_nvme_transport_id *trid,
 	return probe_ctx;
 }
 
+int
+nvme_parse_addr(struct sockaddr_storage *sa, int family, const char *addr, const char *service,
+		long int *port)
+{
+	struct addrinfo *res;
+	struct addrinfo hints;
+	int ret;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = family;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = 0;
+
+	if (addr == NULL || service == NULL) {
+		SPDK_ERRLOG("addr and service must both be non-NULL\n");
+		return -EINVAL;
+	}
+
+	*port = spdk_strtol(service, 10);
+	if (*port <= 0 || *port >= 65536) {
+		SPDK_ERRLOG("Invalid port: %s\n", service);
+		return -EINVAL;
+	}
+
+	ret = getaddrinfo(addr, service, &hints, &res);
+	if (ret) {
+		SPDK_ERRLOG("getaddrinfo failed: %s (%d)\n", gai_strerror(ret), ret);
+		return -(abs(ret));
+	}
+
+	if (res->ai_addrlen > sizeof(*sa)) {
+		SPDK_ERRLOG("getaddrinfo() ai_addrlen %zu too large\n", (size_t)res->ai_addrlen);
+		ret = -EINVAL;
+	} else {
+		memcpy(sa, res->ai_addr, res->ai_addrlen);
+	}
+
+	freeaddrinfo(res);
+	return ret;
+}
+
 SPDK_LOG_REGISTER_COMPONENT(nvme)

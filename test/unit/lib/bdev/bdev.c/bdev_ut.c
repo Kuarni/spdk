@@ -4,7 +4,7 @@
  *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/ut_multithread.c"
 #include "unit/lib/json_mock.c"
@@ -2571,6 +2571,139 @@ bdev_io_max_size_and_segment_split_test(void)
 	stub_complete_io(1);
 	CU_ASSERT(g_io_done == true);
 
+	/* Test that IOs are split on max_rw_size */
+	bdev->max_rw_size = 2;
+	bdev->max_segment_size = 0;
+	bdev->max_num_segments = 0;
+	g_io_done = false;
+
+	/* 5 blocks in a contiguous buffer */
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 5 * 512;
+
+	/* First: offset=0, num_blocks=2 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000, 2 * 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	/* Second: offset=2, num_blocks=2 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 2, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000 + 2 * 512, 2 * 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	/* Third: offset=4, num_blocks=1 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 4, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000 + 4 * 512, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 1, 0, 5, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 3);
+	stub_complete_io(3);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Check splitting on both max_rw_size + max_num_segments */
+	bdev->max_rw_size = 2;
+	bdev->max_num_segments = 2;
+	bdev->max_segment_size = 0;
+	g_io_done = false;
+
+	/* 5 blocks split across 4 iovs */
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 3 * 512;
+	iov[1].iov_base = (void *)0x20000;
+	iov[1].iov_len = 256;
+	iov[2].iov_base = (void *)0x30000;
+	iov[2].iov_len = 256;
+	iov[3].iov_base = (void *)0x40000;
+	iov[3].iov_len = 512;
+
+	/* First: offset=0, num_blocks=2, iovcnt=1 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000, 2 * 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	/* Second: offset=2, num_blocks=1, iovcnt=1 (max_segment_size prevents from submitting
+	 * the rest of iov[0], and iov[1]+iov[2])
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 2, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000 + 2 * 512, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	/* Third: offset=3, num_blocks=1, iovcnt=2 (iov[1]+iov[2]) */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 3, 1, 2);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x20000, 256);
+	ut_expected_io_set_iov(expected_io, 1, (void *)0x30000, 256);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	/* Fourth: offset=4, num_blocks=1, iovcnt=1 (iov[3]) */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 4, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0x40000, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 4, 0, 5, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 4);
+	stub_complete_io(4);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Check splitting on both max_rw_size + max_segment_size */
+	bdev->max_rw_size = 2;
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 0;
+	g_io_done = false;
+
+	/* 6 blocks in a contiguous buffer */
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 6 * 512;
+
+	/* We expect 3 IOs each with 2 blocks and 2 iovs */
+	for (i = 0; i < 3; ++i) {
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 2, 2, 2);
+		ut_expected_io_set_iov(expected_io, 0, (void *)0x10000 + i * 2 * 512, 512);
+		ut_expected_io_set_iov(expected_io, 1, (void *)0x10000 + i * 2 * 512 + 512, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 1, 0, 6, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 3);
+	stub_complete_io(3);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Check splitting on max_rw_size limited by SPDK_BDEV_IO_NUM_CHILD_IOV */
+	bdev->max_rw_size = 1;
+	bdev->max_segment_size = 0;
+	bdev->max_num_segments = 0;
+	g_io_done = false;
+
+	/* SPDK_BDEV_IO_NUM_CHILD_IOV + 1 blocks */
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = (SPDK_BDEV_IO_NUM_CHILD_IOV + 1) * 512;
+
+	/* We expect SPDK_BDEV_IO_NUM_CHILD_IOV + 1 IOs each with a single iov */
+	for (i = 0; i < 3; ++i) {
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i, 1, 1);
+		ut_expected_io_set_iov(expected_io, 0, (void *)0x10000 + i * 512, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 1, 0, SPDK_BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == SPDK_BDEV_IO_NUM_CHILD_IOV);
+	stub_complete_io(SPDK_BDEV_IO_NUM_CHILD_IOV);
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
 	spdk_put_io_channel(io_ch);
 	spdk_bdev_close(desc);
 	free_bdev(bdev);
@@ -4300,7 +4433,7 @@ bdev_close_while_hotremove(void)
 }
 
 static void
-bdev_open_ext(void)
+bdev_open_ext_test(void)
 {
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc1 = NULL;
@@ -7201,7 +7334,6 @@ main(int argc, char **argv)
 	CU_pSuite		suite = NULL;
 	unsigned int		num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev", ut_bdev_setup, ut_bdev_teardown);
@@ -7232,7 +7364,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, bdev_zcopy_read);
 	CU_ADD_TEST(suite, bdev_open_while_hotremove);
 	CU_ADD_TEST(suite, bdev_close_while_hotremove);
-	CU_ADD_TEST(suite, bdev_open_ext);
+	CU_ADD_TEST(suite, bdev_open_ext_test);
 	CU_ADD_TEST(suite, bdev_open_ext_unregister);
 	CU_ADD_TEST(suite, bdev_set_io_timeout);
 	CU_ADD_TEST(suite, bdev_set_qd_sampling);
@@ -7270,9 +7402,7 @@ main(int argc, char **argv)
 	allocate_threads(1);
 	set_thread(0);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	free_threads();

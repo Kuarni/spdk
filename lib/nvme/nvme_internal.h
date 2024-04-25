@@ -375,6 +375,9 @@ struct nvme_request {
 	spdk_nvme_cmd_cb		user_cb_fn;
 	void				*user_cb_arg;
 	void				*user_buffer;
+
+	/** Sequence of accel operations associated with this request */
+	void				*accel_sequence;
 };
 
 struct nvme_completion_poll_status {
@@ -488,6 +491,7 @@ struct spdk_nvme_poll_group {
 	void						*ctx;
 	struct spdk_nvme_accel_fn_table			accel_fn_table;
 	STAILQ_HEAD(, spdk_nvme_transport_poll_group)	tgroups;
+	bool						in_process_completions;
 };
 
 struct spdk_nvme_transport_poll_group {
@@ -804,7 +808,12 @@ enum nvme_ctrlr_state {
 	/**
 	 * Controller initialization has an error.
 	 */
-	NVME_CTRLR_STATE_ERROR
+	NVME_CTRLR_STATE_ERROR,
+
+	/**
+	 * Admin qpair was disconnected, controller needs to be re-initialized
+	 */
+	NVME_CTRLR_STATE_DISCONNECTED,
 };
 
 #define NVME_TIMEOUT_INFINITE		0
@@ -1061,6 +1070,10 @@ struct nvme_driver {
 	int				hotplug_fd;
 };
 
+#define nvme_ns_cmd_get_ext_io_opt(opts, field, defval) \
+       ((opts) != NULL && offsetof(struct spdk_nvme_ns_cmd_ext_io_opts, field) + \
+        sizeof((opts)->field) <= (opts)->size ? (opts)->field : (defval))
+
 extern struct nvme_driver *g_spdk_nvme_driver;
 
 int nvme_driver_init(void);
@@ -1261,6 +1274,7 @@ int	nvme_ctrlr_parse_ana_log_page(struct spdk_nvme_ctrlr *ctrlr,
 		req->md_size = _md_size;		\
 		req->pid = g_spdk_nvme_pid;		\
 		req->submit_tick = 0;			\
+		req->accel_sequence = NULL;		\
 	} while (0);
 
 static inline struct nvme_request *
@@ -1324,6 +1338,16 @@ nvme_complete_request(spdk_nvme_cmd_cb cb_fn, void *cb_arg, struct spdk_nvme_qpa
 {
 	struct spdk_nvme_cpl            err_cpl;
 	struct nvme_error_cmd           *cmd;
+
+	if (spdk_unlikely(req->accel_sequence != NULL)) {
+		struct spdk_nvme_poll_group *pg = qpair->poll_group->group;
+
+		/* Transports are required to execuete the sequence and clear req->accel_sequence.
+		 * If it's left non-NULL it must mean the request is failed. */
+		assert(spdk_nvme_cpl_is_error(cpl));
+		pg->accel_fn_table.abort_sequence(req->accel_sequence);
+		req->accel_sequence = NULL;
+	}
 
 	/* error injection at completion path,
 	 * only inject for successful completed commands
@@ -1568,6 +1592,9 @@ enum spdk_nvme_transport_type nvme_transport_get_trtype(const struct spdk_nvme_t
 void	nvme_ctrlr_proc_get_ref(struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ctrlr_proc_put_ref(struct spdk_nvme_ctrlr *ctrlr);
 int	nvme_ctrlr_get_ref_count(struct spdk_nvme_ctrlr *ctrlr);
+
+int	nvme_parse_addr(struct sockaddr_storage *sa, int family,
+			const char *addr, const char *service, long int *port);
 
 static inline bool
 _is_page_aligned(uint64_t address, uint64_t page_size)

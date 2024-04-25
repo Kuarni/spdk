@@ -449,6 +449,7 @@ Example response:
     "accel_assign_opc",
     "accel_get_module_info",
     "accel_get_opc_assignments",
+    "accel_error_inject_error",
     "ioat_scan_accel_module",
     "dsa_scan_accel_module",
     "dpdk_cryptodev_scan_accel_module",
@@ -482,6 +483,7 @@ Example response:
     "bdev_ftl_load",
     "bdev_ftl_unmap",
     "bdev_ftl_get_stats",
+    "bdev_ftl_get_properties",
     "bdev_lvol_get_lvstores",
     "bdev_lvol_delete",
     "bdev_lvol_resize",
@@ -2035,6 +2037,47 @@ Example response:
 }
 ~~~
 
+### accel_error_inject_error {#rpc_accel_error_inject_error}
+
+Inject an error to execution of a given operation.  Note, that in order for the errors to be
+actually injected, the error module must be assigned to that operation via `accel_assign_opc`.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- |----------| ----------- | -----------------
+opcode                  | Required | string      | Operation to inject errors.
+type                    | Required | string      | Type of errors to inject ("corrupt": corrupt the data, "failure": fail the operation, "disable": disable error injection).
+count                   | Optional | number      | Numbers of errors to inject on each IO channel (`UINT64_MAX` by default).
+interval                | Optional | number      | Interval between injections.
+errcode                 | Optional | number      | Error code to inject (only relevant for type=failure).
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "method": "accel_error_inject_error",
+  "params": {
+    "opcode": "crc32c",
+    "type": "corrupt",
+    "count": 10000,
+    "interval": 8
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ### compressdev_scan_accel_module {#rpc_compressdev_scan_accel_module}
 
 Set config and enable compressdev accel module offload.
@@ -2315,6 +2358,8 @@ Name                    | Optional | Type        | Description
 bdev_io_pool_size       | Optional | number      | Number of spdk_bdev_io structures in shared buffer pool
 bdev_io_cache_size      | Optional | number      | Maximum number of spdk_bdev_io structures cached per thread
 bdev_auto_examine       | Optional | boolean     | If set to false, the bdev layer will not examine every disks automatically
+iobuf_small_cache_size  | Optional | number      | Size of the small iobuf per thread cache
+iobuf_large_cache_size  | Optional | number      | Size of the large iobuf per thread cache
 
 #### Example
 
@@ -3869,6 +3914,7 @@ transport_tos              | Optional | number      | IPv4 Type of Service value
 nvme_error_stat            | Optional | boolean     | Enable collecting NVMe error counts.
 rdma_srq_size              | Optional | number      | Set the size of a shared rdma receive queue. Default: 0 (disabled).
 io_path_stat               | Optional | boolean     | Enable collecting I/O stat of each nvme bdev io path. Default: `false`.
+allow_accel_sequence       | Optional | boolean     | Allow NVMe bdevs to advertise support for accel sequences if the controller also supports them.  Default: `false`.
 
 #### Example
 
@@ -3916,7 +3962,7 @@ and deleted on removal.
 
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
-enabled                 | Required | string      | True to enable, false to disable
+enable                  | Required | string      | True to enable, false to disable
 period_us               | Optional | number      | How often to poll for hot-insert and hot-remove events. Values: 0 - reset/use default or 1 to 10000000.
 
 #### Example
@@ -3927,7 +3973,7 @@ Example request:
 request:
 {
   "params": {
-    "enabled": true,
+    "enable": true,
     "period_us": 2000
   },
   "jsonrpc": "2.0",
@@ -5512,8 +5558,9 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Name of the error injection bdev
 io_type                 | Required | string      | io type 'clear' 'read' 'write' 'unmap' 'flush' 'all'
-error_type              | Required | string      | error type 'failure' 'pending' 'corrupt_data'
+error_type              | Required | string      | error type 'failure' 'pending' 'corrupt_data' 'nomem'
 num                     | Optional | int         | the number of commands you want to fail.(default:1)
+queue_depth             | Optional | int         | the queue depth at which to trigger the error
 corrupt_offset          | Optional | int         | the offset in bytes to xor with corrupt_value
 corrupt_value           | Optional | int         | the value for xor (1-255, 0 is invalid)
 
@@ -6063,6 +6110,52 @@ Example response:
 }
 ~~~
 
+### bdev_ftl_get_properties {#rpc_bdev_ftl_get_properties}
+
+Get FTL properties
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | Bdev name
+
+#### Response
+
+The response contains FTL bdev properties. Some of them can be modified, other
+reported as read only.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "name": "ftl0"
+  },
+  "jsonrpc": "2.0",
+  "method": "bdev_ftl_get_properties",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "name": "ftl0",
+    "properties": {
+      "flush_cache": "true",
+      "fast_shutdown": "true"
+    }
+  }
+}
+~~~
+
 ### bdev_passthru_create {#rpc_bdev_passthru_create}
 
 Create passthru bdev. This bdev type redirects all IO to it's base bdev. It has no other purpose than being an example
@@ -6074,6 +6167,7 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Bdev name
 base_bdev_name          | Required | string      | Base bdev name
+uuid                    | Optional | string      | UUID of new bdev
 
 #### Result
 
@@ -7989,6 +8083,9 @@ secure_channel          | Optional | bool        | Whether all connections immed
 
 #### listen_address {#rpc_nvmf_listen_address}
 
+The listen_address is used for adding the listeners to the NVMe-oF target
+and for referring to discovery services on other targets.
+
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 trtype                  | Required | string      | Transport type ("RDMA")
@@ -8502,6 +8599,129 @@ Example response:
 }
 ~~~
 
+### nvmf_discovery_add_referral  method {#rpc_nvmf_discovery_add_referral}
+
+Add a discovery service referral to an NVMe-oF target. If a referral with the given
+parameters already exists, no action will be taken.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+tgt_name                | Optional | string      | Parent NVMe-oF target name.
+address                 | Required | object      | @ref rpc_nvmf_listen_address object
+secure_channel          | Optional | bool        | The connection to that discovery subsystem requires a secure channel
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "nvmf_discovery_add_referral",
+  "params": {
+    "address": {
+      "trtype": "RDMA",
+      "adrfam": "IPv4",
+      "traddr": "192.168.0.123",
+      "trsvcid": "4420"
+    }
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### nvmf_discovery_remove_referral  method {#rpc_nvmf_discovery_remove_referral}
+
+Remove a discovery service referral from an NVMe-oF target.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+tgt_name                | Optional | string      | Parent NVMe-oF target name.
+address                 | Required | object      | @ref rpc_nvmf_listen_address object
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "nvmf_discovery_remove_referral",
+  "params": {
+    "address": {
+      "trtype": "RDMA",
+      "adrfam": "IPv4",
+      "traddr": "192.168.0.123",
+      "trsvcid": "4420"
+    }
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### nvmf_discovery_get_referrals {#rpc_nvmf_discovery_get_referrals}
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+tgt_name                | Optional | string      | Parent NVMe-oF target name.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "nvmf_discovery_get_referrals"
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "address": {
+        "trtype": "RDMA",
+        "adrfam": "IPv4",
+        "traddr": "192.168.0.123",
+        "trsvcid": "4420"
+      }
+    }
+  ]
+}
+~~~
+
 ### nvmf_set_config {#rpc_nvmf_set_config}
 
 Set global configuration of NVMe-oF target.  This RPC may only be called before SPDK subsystems
@@ -8989,6 +9209,7 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 ctrlr                   | Required | string      | Controller name
 cpumask                 | Optional | string      | @ref cpu_mask for this controller
+delay                   | Optional | boolean     | If true, delay the controller startup.
 
 #### Example
 
@@ -8998,7 +9219,8 @@ Example request:
 {
   "params": {
     "cpumask": "0x2",
-    "ctrlr": "VhostScsi0"
+    "ctrlr": "VhostScsi0",
+    "delay": true
   },
   "jsonrpc": "2.0",
   "method": "vhost_create_scsi_controller",
@@ -9009,6 +9231,42 @@ Example request:
 Example response:
 
 ~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### vhost_start_scsi_controller {#rpc_vhost_start_scsi_controller}
+
+Start vhost SCSI controller, if controller is already started, do nothing.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+ctrlr                   | Required | string      | Controller name
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "ctrlr": "VhostScsi0",
+  },
+  "jsonrpc": "2.0",
+  "method": "vhost_start_scsi_controller",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+response:
 {
   "jsonrpc": "2.0",
   "id": 1,
@@ -10132,6 +10390,7 @@ Example response:
   "result": [
     {
       "name": "RaidBdev0",
+      "uuid": "7d352e83-fe27-40f2-8fef-64563355e076",
       "strip_size_kb": 128,
       "state": "online",
       "raid_level": "raid0",
@@ -10144,6 +10403,7 @@ Example response:
     },
     {
       "name": "RaidBdev1",
+      "uuid": "f7cb71ed-2d0e-4240-979e-27b0b7735f36",
       "strip_size_kb": 128,
       "state": "configuring",
       "raid_level": "raid0",
@@ -10170,6 +10430,8 @@ name                    | Required | string      | RAID bdev name
 strip_size_kb           | Required | number      | Strip size in KB
 raid_level              | Required | string      | RAID level
 base_bdevs              | Required | string      | Base bdevs name, whitespace separated list in quotes
+uuid                    | Optional | string      | UUID for this RAID bdev
+superblock              | Optional | boolean     | If set, information about raid bdev will be stored in superblock on each base bdev (default: `false`)
 
 #### Example
 
@@ -11978,6 +12240,76 @@ Example response:
   "jsonrpc": "2.0",
   "id": 1,
   "result": true
+}
+~~~
+
+### iobuf_get_stats {#rpc_iobuf_get_stats}
+
+Retrieve iobuf's statistics.
+
+#### Parameters
+
+None.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "iobuf_get_stats",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "module": "accel",
+      "small_pool": {
+        "cache": 0,
+        "main": 0,
+        "retry": 0
+      },
+      "large_pool": {
+        "cache": 0,
+        "main": 0,
+        "retry": 0
+      }
+    },
+    {
+      "module": "bdev",
+      "small_pool": {
+        "cache": 421965,
+        "main": 1218,
+        "retry": 0
+      },
+      "large_pool": {
+        "cache": 0,
+        "main": 0,
+        "retry": 0
+      }
+    },
+    {
+      "module": "nvmf_TCP",
+      "small_pool": {
+        "cache": 7,
+        "main": 0,
+        "retry": 0
+      },
+      "large_pool": {
+        "cache": 0,
+        "main": 0,
+        "retry": 0
+      }
+    }
+  ]
 }
 ~~~
 

@@ -1375,7 +1375,6 @@ nvmf_fc_request_execute(struct spdk_nvmf_fc_request *fc_req)
 			}
 			return -EAGAIN;
 		}
-		fc_req->req.data = fc_req->req.iov[0].iov_base;
 	}
 
 	if (fc_req->req.xfer == SPDK_NVME_DATA_HOST_TO_CONTROLLER) {
@@ -1578,8 +1577,7 @@ _nvmf_fc_request_free(struct spdk_nvmf_fc_request *fc_req)
 		spdk_nvmf_request_free_buffers(&fc_req->req, group,
 					       group->transport);
 	}
-	fc_req->req.data = NULL;
-	fc_req->req.iovcnt  = 0;
+	fc_req->req.iovcnt = 0;
 
 	/* Free Fc request */
 	nvmf_fc_conn_free_fc_request(fc_req->fc_conn, fc_req);
@@ -3130,7 +3128,7 @@ nvmf_fc_adm_add_rem_nport_listener(struct spdk_nvmf_fc_nport *nport, bool add)
 	while (subsystem) {
 		struct nvmf_fc_add_rem_listener_ctx *ctx;
 
-		if (spdk_nvmf_subsytem_any_listener_allowed(subsystem) == true) {
+		if (spdk_nvmf_subsystem_any_listener_allowed(subsystem) == true) {
 			ctx = calloc(1, sizeof(struct nvmf_fc_add_rem_listener_ctx));
 			if (ctx) {
 				ctx->add_listener = add;

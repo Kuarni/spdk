@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019-2021 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021, 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -30,9 +30,13 @@ const struct spdk_nvmf_transport_ops spdk_nvmf_transport_rdma;
 /*
  RDMA Connection Resource Defaults
  */
+#define NVMF_DEFAULT_MSDBD		16
 #define NVMF_DEFAULT_TX_SGE		SPDK_NVMF_MAX_SGL_ENTRIES
 #define NVMF_DEFAULT_RSP_SGE		1
 #define NVMF_DEFAULT_RX_SGE		2
+
+SPDK_STATIC_ASSERT(NVMF_DEFAULT_MSDBD <= SPDK_NVMF_MAX_SGL_ENTRIES,
+		   "MSDBD must not exceed SPDK_NVMF_MAX_SGL_ENTRIES");
 
 /* The RDMA completion queue size */
 #define DEFAULT_NVMF_RDMA_CQ_SIZE	4096
@@ -182,7 +186,8 @@ enum spdk_nvmf_rdma_wr_type {
 };
 
 struct spdk_nvmf_rdma_wr {
-	enum spdk_nvmf_rdma_wr_type	type;
+	/* Uses enum spdk_nvmf_rdma_wr_type */
+	uint8_t type;
 };
 
 /* This structure holds commands as they are received off the wire.
@@ -208,7 +213,6 @@ struct spdk_nvmf_rdma_recv {
 };
 
 struct spdk_nvmf_rdma_request_data {
-	struct spdk_nvmf_rdma_wr	rdma_wr;
 	struct ibv_send_wr		wr;
 	struct ibv_sge			sgl[SPDK_NVMF_MAX_SGL_ENTRIES];
 };
@@ -216,7 +220,13 @@ struct spdk_nvmf_rdma_request_data {
 struct spdk_nvmf_rdma_request {
 	struct spdk_nvmf_request		req;
 
-	enum spdk_nvmf_rdma_request_state	state;
+	bool					fused_failed;
+
+	struct spdk_nvmf_rdma_wr		data_wr;
+	struct spdk_nvmf_rdma_wr		rsp_wr;
+
+	/* Uses enum spdk_nvmf_rdma_request_state */
+	uint8_t					state;
 
 	/* Data offset in req.iov */
 	uint32_t				offset;
@@ -224,22 +234,20 @@ struct spdk_nvmf_rdma_request {
 	struct spdk_nvmf_rdma_recv		*recv;
 
 	struct {
-		struct spdk_nvmf_rdma_wr	rdma_wr;
 		struct	ibv_send_wr		wr;
 		struct	ibv_sge			sgl[NVMF_DEFAULT_RSP_SGE];
 	} rsp;
 
-	struct spdk_nvmf_rdma_request_data	data;
-
-	uint32_t				iovpos;
-
-	uint32_t				num_outstanding_data_wr;
+	uint16_t				iovpos;
+	uint16_t				num_outstanding_data_wr;
+	/* Used to split Write IO with multi SGL payload */
+	uint16_t				num_remaining_data_wr;
 	uint64_t				receive_tsc;
-
-	bool					fused_failed;
 	struct spdk_nvmf_rdma_request		*fused_pair;
-
 	STAILQ_ENTRY(spdk_nvmf_rdma_request)	state_link;
+	struct ibv_send_wr			*remaining_tranfer_in_wrs;
+	struct ibv_send_wr			*transfer_wr;
+	struct spdk_nvmf_rdma_request_data	data;
 };
 
 struct spdk_nvmf_rdma_resource_opts {
@@ -617,28 +625,48 @@ nvmf_rdma_update_ibv_state(struct spdk_nvmf_rdma_qpair *rqpair) {
 	return new_state;
 }
 
+/*
+ * Return data_wrs to pool starting from \b data_wr
+ * Request's own response and data WR are excluded
+ */
+static void
+_nvmf_rdma_request_free_data(struct spdk_nvmf_rdma_request *rdma_req,
+			     struct ibv_send_wr *data_wr,
+			     struct spdk_mempool *pool)
+{
+	struct spdk_nvmf_rdma_request_data	*work_requests[SPDK_NVMF_MAX_SGL_ENTRIES];
+	struct spdk_nvmf_rdma_request_data	*nvmf_data;
+	struct ibv_send_wr			*next_send_wr;
+	uint64_t				req_wrid = (uint64_t)&rdma_req->data_wr;
+	uint32_t				num_wrs = 0;
+
+	while (data_wr && data_wr->wr_id == req_wrid) {
+		nvmf_data = SPDK_CONTAINEROF(data_wr, struct spdk_nvmf_rdma_request_data, wr);
+		memset(nvmf_data->sgl, 0, sizeof(data_wr->sg_list[0]) * data_wr->num_sge);
+		data_wr->num_sge = 0;
+		next_send_wr = data_wr->next;
+		if (data_wr != &rdma_req->data.wr) {
+			data_wr->next = NULL;
+			assert(num_wrs < SPDK_NVMF_MAX_SGL_ENTRIES);
+			work_requests[num_wrs] = nvmf_data;
+			num_wrs++;
+		}
+		data_wr = (!next_send_wr || next_send_wr == &rdma_req->rsp.wr) ? NULL : next_send_wr;
+	}
+
+	if (num_wrs) {
+		spdk_mempool_put_bulk(pool, (void **) work_requests, num_wrs);
+	}
+}
+
 static void
 nvmf_rdma_request_free_data(struct spdk_nvmf_rdma_request *rdma_req,
 			    struct spdk_nvmf_rdma_transport *rtransport)
 {
-	struct spdk_nvmf_rdma_request_data	*data_wr;
-	struct ibv_send_wr			*next_send_wr;
-	uint64_t				req_wrid;
-
 	rdma_req->num_outstanding_data_wr = 0;
-	data_wr = &rdma_req->data;
-	req_wrid = data_wr->wr.wr_id;
-	while (data_wr && data_wr->wr.wr_id == req_wrid) {
-		memset(data_wr->sgl, 0, sizeof(data_wr->wr.sg_list[0]) * data_wr->wr.num_sge);
-		data_wr->wr.num_sge = 0;
-		next_send_wr = data_wr->wr.next;
-		if (data_wr != &rdma_req->data) {
-			data_wr->wr.next = NULL;
-			spdk_mempool_put(rtransport->data_wr_pool, data_wr);
-		}
-		data_wr = (!next_send_wr || next_send_wr == &rdma_req->rsp.wr) ? NULL :
-			  SPDK_CONTAINEROF(next_send_wr, struct spdk_nvmf_rdma_request_data, wr);
-	}
+
+	_nvmf_rdma_request_free_data(rdma_req, rdma_req->transfer_wr, rtransport->data_wr_pool);
+
 	rdma_req->data.wr.next = NULL;
 	rdma_req->rsp.wr.next = NULL;
 }
@@ -806,8 +834,8 @@ nvmf_rdma_resources_create(struct spdk_nvmf_rdma_resource_opts *opts)
 		}
 		rdma_req->rsp.sgl[0].lkey = spdk_rdma_memory_translation_get_lkey(&translation);
 
-		rdma_req->rsp.rdma_wr.type = RDMA_WR_TYPE_SEND;
-		rdma_req->rsp.wr.wr_id = (uintptr_t)&rdma_req->rsp.rdma_wr;
+		rdma_req->rsp_wr.type = RDMA_WR_TYPE_SEND;
+		rdma_req->rsp.wr.wr_id = (uintptr_t)&rdma_req->rsp_wr;
 		rdma_req->rsp.wr.next = NULL;
 		rdma_req->rsp.wr.opcode = IBV_WR_SEND;
 		rdma_req->rsp.wr.send_flags = IBV_SEND_SIGNALED;
@@ -815,8 +843,8 @@ nvmf_rdma_resources_create(struct spdk_nvmf_rdma_resource_opts *opts)
 		rdma_req->rsp.wr.num_sge = SPDK_COUNTOF(rdma_req->rsp.sgl);
 
 		/* Set up memory for data buffers */
-		rdma_req->data.rdma_wr.type = RDMA_WR_TYPE_DATA;
-		rdma_req->data.wr.wr_id = (uintptr_t)&rdma_req->data.rdma_wr;
+		rdma_req->data_wr.type = RDMA_WR_TYPE_DATA;
+		rdma_req->data.wr.wr_id = (uintptr_t)&rdma_req->data_wr;
 		rdma_req->data.wr.next = NULL;
 		rdma_req->data.wr.send_flags = IBV_SEND_SIGNALED;
 		rdma_req->data.wr.sg_list = rdma_req->data.sgl;
@@ -1108,7 +1136,7 @@ request_transfer_in(struct spdk_nvmf_request *req)
 	assert(req->xfer == SPDK_NVME_DATA_HOST_TO_CONTROLLER);
 	assert(rdma_req != NULL);
 
-	if (spdk_rdma_qp_queue_send_wrs(rqpair->rdma_qp, &rdma_req->data.wr)) {
+	if (spdk_rdma_qp_queue_send_wrs(rqpair->rdma_qp, rdma_req->transfer_wr)) {
 		STAILQ_INSERT_TAIL(&rqpair->poller->qpairs_pending_send, rqpair, send_link);
 	}
 	if (rtransport->rdma_opts.no_wr_batching) {
@@ -1117,6 +1145,48 @@ request_transfer_in(struct spdk_nvmf_request *req)
 
 	rqpair->current_read_depth += rdma_req->num_outstanding_data_wr;
 	rqpair->current_send_depth += rdma_req->num_outstanding_data_wr;
+	return 0;
+}
+
+static inline int
+nvmf_rdma_request_reset_transfer_in(struct spdk_nvmf_rdma_request *rdma_req,
+				    struct spdk_nvmf_rdma_transport *rtransport)
+{
+	/* Put completed WRs back to pool and move transfer_wr pointer */
+	_nvmf_rdma_request_free_data(rdma_req, rdma_req->transfer_wr, rtransport->data_wr_pool);
+	rdma_req->transfer_wr = rdma_req->remaining_tranfer_in_wrs;
+	rdma_req->remaining_tranfer_in_wrs = NULL;
+	rdma_req->num_outstanding_data_wr = rdma_req->num_remaining_data_wr;
+	rdma_req->num_remaining_data_wr = 0;
+
+	return 0;
+}
+
+static inline int
+request_prepare_transfer_in_part(struct spdk_nvmf_request *req, uint32_t num_reads_available)
+{
+	struct spdk_nvmf_rdma_request	*rdma_req;
+	struct ibv_send_wr		*wr;
+	uint32_t i;
+
+	rdma_req = SPDK_CONTAINEROF(req, struct spdk_nvmf_rdma_request, req);
+
+	assert(req->xfer == SPDK_NVME_DATA_HOST_TO_CONTROLLER);
+	assert(rdma_req != NULL);
+	assert(num_reads_available > 0);
+	assert(rdma_req->num_outstanding_data_wr > num_reads_available);
+	wr = rdma_req->transfer_wr;
+
+	for (i = 0; i < num_reads_available - 1; i++) {
+		wr = wr->next;
+	}
+
+	rdma_req->remaining_tranfer_in_wrs = wr->next;
+	rdma_req->num_remaining_data_wr = rdma_req->num_outstanding_data_wr - num_reads_available;
+	rdma_req->num_outstanding_data_wr = num_reads_available;
+	/* Break chain of WRs to send only part. Once this portion completes, we continue sending RDMA_READs */
+	wr->next = NULL;
+
 	return 0;
 }
 
@@ -1168,7 +1238,7 @@ request_transfer_out(struct spdk_nvmf_request *req, int *data_posted)
 		 */
 		rdma_req->num_outstanding_data_wr = 0;
 	} else if (req->xfer == SPDK_NVME_DATA_CONTROLLER_TO_HOST) {
-		first = &rdma_req->data.wr;
+		first = rdma_req->transfer_wr;
 		*data_posted = 1;
 		num_outstanding_data_wr = rdma_req->num_outstanding_data_wr;
 	}
@@ -1298,19 +1368,36 @@ nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *e
 	SPDK_DEBUGLOG(rdma,
 		      "Host (Initiator) NIC Max Incoming RDMA R/W operations: %d Max Outgoing RDMA R/W operations: %d\n",
 		      rdma_param->initiator_depth, rdma_param->responder_resources);
-	if (rdma_param->initiator_depth > 0) {
-		max_read_depth = spdk_min(max_read_depth, rdma_param->initiator_depth);
+	/* from man3 rdma_get_cm_event
+	 * responder_resources - Specifies the number of responder resources that is requested by the recipient.
+	 * The responder_resources field must match the initiator depth specified by the remote node when running
+	 * the rdma_connect and rdma_accept functions. */
+	if (rdma_param->responder_resources != 0) {
+		if (private_data->qid) {
+			SPDK_DEBUGLOG(rdma, "Host (Initiator) is not allowed to use RDMA operations,"
+				      " responder_resources must be 0 but set to %u\n",
+				      rdma_param->responder_resources);
+		} else {
+			SPDK_WARNLOG("Host (Initiator) is not allowed to use RDMA operations,"
+				     " responder_resources must be 0 but set to %u\n",
+				     rdma_param->responder_resources);
+		}
 	}
+	/* from man3 rdma_get_cm_event
+	 * initiator_depth - Specifies the maximum number of outstanding RDMA read operations that the recipient holds.
+	 * The initiator_depth field must match the responder resources specified by the remote node when running
+	 * the rdma_connect and rdma_accept functions. */
+	if (rdma_param->initiator_depth == 0) {
+		SPDK_ERRLOG("Host (Initiator) doesn't support RDMA_READ or atomic operations\n");
+		nvmf_rdma_event_reject(event->id, SPDK_NVMF_RDMA_ERROR_INVALID_IRD);
+		return -1;
+	}
+	max_read_depth = spdk_min(max_read_depth, rdma_param->initiator_depth);
 
-	/* Finally check for the host software requested values, which are
-	 * optional. */
-	if (rdma_param->private_data != NULL &&
-	    rdma_param->private_data_len >= sizeof(struct spdk_nvmf_rdma_request_private_data)) {
-		SPDK_DEBUGLOG(rdma, "Host Receive Queue Size: %d\n", private_data->hrqsize);
-		SPDK_DEBUGLOG(rdma, "Host Send Queue Size: %d\n", private_data->hsqsize);
-		max_queue_depth = spdk_min(max_queue_depth, private_data->hrqsize);
-		max_queue_depth = spdk_min(max_queue_depth, private_data->hsqsize + 1);
-	}
+	SPDK_DEBUGLOG(rdma, "Host Receive Queue Size: %d\n", private_data->hrqsize);
+	SPDK_DEBUGLOG(rdma, "Host Send Queue Size: %d\n", private_data->hsqsize);
+	max_queue_depth = spdk_min(max_queue_depth, private_data->hrqsize);
+	max_queue_depth = spdk_min(max_queue_depth, private_data->hsqsize + 1);
 
 	SPDK_DEBUGLOG(rdma, "Final Negotiated Queue Depth: %d R/W Depth: %d\n",
 		      max_queue_depth, max_read_depth);
@@ -1839,9 +1926,6 @@ nvmf_rdma_request_parse_sgl(struct spdk_nvmf_rdma_transport *rtransport,
 			return 0;
 		}
 
-		/* backward compatible */
-		req->data = req->iov[0].iov_base;
-
 		SPDK_DEBUGLOG(rdma, "Request %p took %d buffer/s from central pool\n", rdma_req,
 			      req->iovcnt);
 
@@ -1876,7 +1960,6 @@ nvmf_rdma_request_parse_sgl(struct spdk_nvmf_rdma_transport *rtransport,
 		req->iov[0].iov_base = rdma_req->recv->buf + offset;
 		req->iov[0].iov_len = req->length;
 		req->iovcnt = 1;
-		req->data = req->iov[0].iov_base;
 
 		return 0;
 	} else if (sgl->generic.type == SPDK_NVME_SGL_TYPE_LAST_SEGMENT &&
@@ -1891,9 +1974,6 @@ nvmf_rdma_request_parse_sgl(struct spdk_nvmf_rdma_transport *rtransport,
 			rsp->status.sc = SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID;
 			return -1;
 		}
-
-		/* backward compatible */
-		req->data = req->iov[0].iov_base;
 
 		SPDK_DEBUGLOG(rdma, "Request %p took %d buffer/s from central pool\n", rdma_req,
 			      req->iovcnt);
@@ -1928,10 +2008,10 @@ _nvmf_rdma_request_free(struct spdk_nvmf_rdma_request *rdma_req,
 	nvmf_rdma_request_free_data(rdma_req, rtransport);
 	rdma_req->req.length = 0;
 	rdma_req->req.iovcnt = 0;
-	rdma_req->req.data = NULL;
 	rdma_req->offset = 0;
 	rdma_req->req.dif_enabled = false;
 	rdma_req->fused_failed = false;
+	rdma_req->transfer_wr = NULL;
 	if (rdma_req->fused_pair) {
 		/* This req was part of a valid fused pair, but failed before it got to
 		 * READ_TO_EXECUTE state.  This means we need to fail the other request
@@ -2015,7 +2095,7 @@ nvmf_rdma_request_process(struct spdk_nvmf_rdma_transport *rtransport,
 	enum spdk_nvmf_rdma_request_state prev_state;
 	bool				progress = false;
 	int				data_posted;
-	uint32_t			num_blocks;
+	uint32_t			num_blocks, num_rdma_reads_available, qdepth;
 
 	rqpair = SPDK_CONTAINEROF(rdma_req->req.qpair, struct spdk_nvmf_rdma_qpair, qpair);
 	device = rqpair->device;
@@ -2055,6 +2135,7 @@ nvmf_rdma_request_process(struct spdk_nvmf_rdma_transport *rtransport,
 			/* The first element of the SGL is the NVMe command */
 			rdma_req->req.cmd = (union nvmf_h2c_msg *)rdma_recv->sgl[0].addr;
 			memset(rdma_req->req.rsp, 0, sizeof(*rdma_req->req.rsp));
+			rdma_req->transfer_wr = &rdma_req->data.wr;
 
 			if (rqpair->ibv_state == IBV_QPS_ERR  || rqpair->qpair.state != SPDK_NVMF_QPAIR_ACTIVE) {
 				rdma_req->state = RDMA_REQUEST_STATE_COMPLETED;
@@ -2139,11 +2220,18 @@ nvmf_rdma_request_process(struct spdk_nvmf_rdma_transport *rtransport,
 				/* This request needs to wait in line to perform RDMA */
 				break;
 			}
-			if (rqpair->current_send_depth + rdma_req->num_outstanding_data_wr > rqpair->max_send_depth
-			    || rqpair->current_read_depth + rdma_req->num_outstanding_data_wr > rqpair->max_read_depth) {
-				/* We can only have so many WRs outstanding. we have to wait until some finish. */
-				rqpair->poller->stat.pending_rdma_read++;
-				break;
+			qdepth = rqpair->max_send_depth - rqpair->current_send_depth;
+			num_rdma_reads_available = rqpair->max_read_depth - rqpair->current_read_depth;
+			if (rdma_req->num_outstanding_data_wr > qdepth ||
+			    rdma_req->num_outstanding_data_wr > num_rdma_reads_available) {
+				if (num_rdma_reads_available && qdepth) {
+					/* Send as much as we can */
+					request_prepare_transfer_in_part(&rdma_req->req, spdk_min(num_rdma_reads_available, qdepth));
+				} else {
+					/* We can only have so many WRs outstanding. we have to wait until some finish. */
+					rqpair->poller->stat.pending_rdma_read++;
+					break;
+				}
 			}
 
 			/* We have already verified that this request is the head of the queue. */
@@ -2818,6 +2906,7 @@ nvmf_rdma_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_t
 	struct addrinfo			hints;
 	int				family;
 	int				rc;
+	long int			port_val;
 	bool				is_retry = false;
 
 	if (!strlen(trid->trsvcid)) {
@@ -2854,6 +2943,18 @@ nvmf_rdma_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_t
 	hints.ai_flags = AI_NUMERICSERV;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = 0;
+
+	/* Range check the trsvcid. Fail in 3 cases:
+	 * < 0: means that spdk_strtol hit an error
+	 * 0: this results in ephemeral port which we don't want
+	 * > 65535: port too high
+	 */
+	port_val = spdk_strtol(trid->trsvcid, 10);
+	if (port_val <= 0 || port_val > 65535) {
+		SPDK_ERRLOG("invalid trsvcid %s\n", trid->trsvcid);
+		free(port);
+		return -EINVAL;
+	}
 
 	rc = getaddrinfo(trid->traddr, trid->trsvcid, &hints, &res);
 	if (rc) {
@@ -2914,6 +3015,7 @@ nvmf_rdma_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_t
 			    port->id->verbs);
 		rdma_destroy_id(port->id);
 		free(port);
+		nvmf_rdma_rescan_devices(rtransport);
 		return -EINVAL;
 	}
 
@@ -3320,7 +3422,7 @@ nvmf_rdma_destroy_drained_qpair(struct spdk_nvmf_rdma_qpair *rqpair)
 }
 
 static int
-nvmf_rdma_disconnect(struct rdma_cm_event *evt)
+nvmf_rdma_disconnect(struct rdma_cm_event *evt, bool *event_acked)
 {
 	struct spdk_nvmf_qpair		*qpair;
 	struct spdk_nvmf_rdma_qpair	*rqpair;
@@ -3335,6 +3437,9 @@ nvmf_rdma_disconnect(struct rdma_cm_event *evt)
 		SPDK_ERRLOG("disconnect request: no active connection\n");
 		return -1;
 	}
+
+	rdma_ack_cm_event(evt);
+	*event_acked = true;
 
 	rqpair = SPDK_CONTAINEROF(qpair, struct spdk_nvmf_rdma_qpair, qpair);
 
@@ -3531,7 +3636,7 @@ nvmf_process_cm_event(struct spdk_nvmf_transport *transport)
 			/* TODO: Should we be waiting for this event anywhere? */
 			break;
 		case RDMA_CM_EVENT_DISCONNECTED:
-			rc = nvmf_rdma_disconnect(event);
+			rc = nvmf_rdma_disconnect(event, &event_acked);
 			if (rc < 0) {
 				SPDK_ERRLOG("Unable to process disconnect event. rc: %d\n", rc);
 				break;
@@ -3547,7 +3652,7 @@ nvmf_process_cm_event(struct spdk_nvmf_transport *transport)
 			if (event->id->qp) {
 				/* If rdma_cm event has a valid `qp` pointer then the event refers to the
 				 * corresponding qpair. Otherwise the event refers to a listening device. */
-				rc = nvmf_rdma_disconnect(event);
+				rc = nvmf_rdma_disconnect(event, &event_acked);
 				if (rc < 0) {
 					SPDK_ERRLOG("Unable to process disconnect event. rc: %d\n", rc);
 					break;
@@ -3806,7 +3911,7 @@ static void
 nvmf_rdma_cdata_init(struct spdk_nvmf_transport *transport, struct spdk_nvmf_subsystem *subsystem,
 		     struct spdk_nvmf_ctrlr_data *cdata)
 {
-	cdata->nvmf_specific.msdbd = SPDK_NVMF_MAX_SGL_ENTRIES;
+	cdata->nvmf_specific.msdbd = NVMF_DEFAULT_MSDBD;
 
 	/* Disable in-capsule data transfer for RDMA controller when dif_insert_or_strip is enabled
 	since in-capsule data only works with NVME drives that support SGL memory layout */
@@ -4020,14 +4125,14 @@ nvmf_rdma_get_optimal_poll_group(struct spdk_nvmf_qpair *qpair)
 		min_value = nvmf_poll_group_get_io_qpair_count(pg_current->group.group);
 
 		while ((count = nvmf_poll_group_get_io_qpair_count(pg_current->group.group)) > 0) {
-			pg_current = TAILQ_NEXT(pg_current, link);
-			if (pg_current == NULL) {
-				pg_current = TAILQ_FIRST(&rtransport->poll_groups);
-			}
-
 			if (count < min_value) {
 				min_value = count;
 				pg_min = pg_current;
+			}
+
+			pg_current = TAILQ_NEXT(pg_current, link);
+			if (pg_current == NULL) {
+				pg_current = TAILQ_FIRST(&rtransport->poll_groups);
 			}
 
 			if (pg_current == pg_start) {
@@ -4381,14 +4486,14 @@ _qp_reset_failed_sends(struct spdk_nvmf_rdma_transport *rtransport,
 		rqpair->current_send_depth--;
 		switch (bad_rdma_wr->type) {
 		case RDMA_WR_TYPE_DATA:
-			cur_rdma_req = SPDK_CONTAINEROF(bad_rdma_wr, struct spdk_nvmf_rdma_request, data.rdma_wr);
+			cur_rdma_req = SPDK_CONTAINEROF(bad_rdma_wr, struct spdk_nvmf_rdma_request, data_wr);
 			if (bad_wr->opcode == IBV_WR_RDMA_READ) {
 				assert(rqpair->current_read_depth > 0);
 				rqpair->current_read_depth--;
 			}
 			break;
 		case RDMA_WR_TYPE_SEND:
-			cur_rdma_req = SPDK_CONTAINEROF(bad_rdma_wr, struct spdk_nvmf_rdma_request, rsp.rdma_wr);
+			cur_rdma_req = SPDK_CONTAINEROF(bad_rdma_wr, struct spdk_nvmf_rdma_request, rsp_wr);
 			break;
 		default:
 			SPDK_ERRLOG("Found a RECV in the list of pending SEND requests for qpair %p\n", rqpair);
@@ -4494,6 +4599,7 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 	struct spdk_nvmf_rdma_qpair	*rqpair, *tmp_rqpair;
 	int reaped, i;
 	int count = 0;
+	int rc;
 	bool error = false;
 	uint64_t poll_tsc = spdk_get_ticks();
 
@@ -4527,7 +4633,7 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 
 		switch (rdma_wr->type) {
 		case RDMA_WR_TYPE_SEND:
-			rdma_req = SPDK_CONTAINEROF(rdma_wr, struct spdk_nvmf_rdma_request, rsp.rdma_wr);
+			rdma_req = SPDK_CONTAINEROF(rdma_wr, struct spdk_nvmf_rdma_request, rsp_wr);
 			rqpair = SPDK_CONTAINEROF(rdma_req->req.qpair, struct spdk_nvmf_rdma_qpair, qpair);
 
 			if (!wc[i].status) {
@@ -4554,7 +4660,6 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 				 */
 				if (spdk_unlikely(NULL == rdma_recv->qpair)) {
 					struct ibv_recv_wr *bad_wr;
-					int rc;
 
 					rdma_recv->wr.next = NULL;
 					spdk_rdma_srq_queue_recv_wrs(rpoller->srq, &rdma_recv->wr);
@@ -4583,7 +4688,7 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 			STAILQ_INSERT_HEAD(&rqpair->resources->incoming_queue, rdma_recv, link);
 			break;
 		case RDMA_WR_TYPE_DATA:
-			rdma_req = SPDK_CONTAINEROF(rdma_wr, struct spdk_nvmf_rdma_request, data.rdma_wr);
+			rdma_req = SPDK_CONTAINEROF(rdma_wr, struct spdk_nvmf_rdma_request, data_wr);
 			rqpair = SPDK_CONTAINEROF(rdma_req->req.qpair, struct spdk_nvmf_rdma_qpair, qpair);
 
 			assert(rdma_req->num_outstanding_data_wr > 0);
@@ -4595,6 +4700,19 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 				rqpair->current_read_depth--;
 				/* wait for all outstanding reads associated with the same rdma_req to complete before proceeding. */
 				if (rdma_req->num_outstanding_data_wr == 0) {
+					if (spdk_unlikely(rdma_req->num_remaining_data_wr)) {
+						/* Only part of RDMA_READ operations was submitted, process the rest */
+						rc = nvmf_rdma_request_reset_transfer_in(rdma_req, rtransport);
+						if (spdk_likely(!rc)) {
+							STAILQ_INSERT_TAIL(&rqpair->pending_rdma_read_queue, rdma_req, state_link);
+							rdma_req->state = RDMA_REQUEST_STATE_DATA_TRANSFER_TO_CONTROLLER_PENDING;
+						} else {
+							rdma_req->state = RDMA_REQUEST_STATE_READY_TO_COMPLETE;
+							rdma_req->req.rsp->nvme_cpl.status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
+						}
+						nvmf_rdma_request_process(rtransport, rdma_req);
+						break;
+					}
 					rdma_req->state = RDMA_REQUEST_STATE_READY_TO_EXECUTE;
 					nvmf_rdma_request_process(rtransport, rdma_req);
 				}

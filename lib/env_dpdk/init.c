@@ -24,15 +24,9 @@
 #define SPDK_ENV_DPDK_DEFAULT_CORE_MASK		"0x1"
 #define SPDK_ENV_DPDK_DEFAULT_BASE_VIRTADDR	0x200000000000
 
-#if RTE_VERSION < RTE_VERSION_NUM(20, 11, 0, 0)
-#define DPDK_ALLOW_PARAM	"--pci-whitelist"
-#define DPDK_BLOCK_PARAM	"--pci-blacklist"
-#define DPDK_MAIN_CORE_PARAM	"--master-lcore"
-#else
 #define DPDK_ALLOW_PARAM	"--allow"
 #define DPDK_BLOCK_PARAM	"--block"
 #define DPDK_MAIN_CORE_PARAM	"--main-lcore"
-#endif
 
 static char **g_eal_cmdline;
 static int g_eal_cmdline_argcount;
@@ -359,6 +353,14 @@ build_eal_cmdline(const struct spdk_env_opts *opts)
 				return -1;
 			}
 		}
+	}
+
+	/* Disable DPDK telemetry information by default, can be modified with env_context.
+	 * Prevents creation of dpdk_telemetry socket and additional pthread for it.
+	 */
+	args = push_arg(args, &argcount, _sprintf_alloc("--no-telemetry"));
+	if (args == NULL) {
+		return -1;
 	}
 
 	/* Lower default EAL loglevel to RTE_LOG_NOTICE - normal, but significant messages.

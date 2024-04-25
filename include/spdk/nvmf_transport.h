@@ -78,7 +78,6 @@ struct spdk_nvmf_request {
 	uint8_t				xfer; /* type enum spdk_nvme_data_transfer */
 	bool				data_from_pool;
 	bool				dif_enabled;
-	void				*data;
 	union nvmf_h2c_msg		*cmd;
 	union nvmf_c2h_msg		*rsp;
 	STAILQ_ENTRY(spdk_nvmf_request)	buf_link;
@@ -86,9 +85,15 @@ struct spdk_nvmf_request {
 
 	uint32_t			iovcnt;
 	struct iovec			iov[NVMF_REQ_MAX_BUFFERS];
-	struct spdk_nvmf_stripped_data  *stripped_data;
+	struct spdk_nvmf_stripped_data	*stripped_data;
 
 	struct spdk_nvmf_dif_info	dif;
+
+	/* Memory domain which describes payload in this request. If the bdev doesn't support memory
+	 * domains, bdev layer will do the necessary push or pull operation. */
+	struct spdk_memory_domain	*memory_domain;
+	/* Context to be passed to memory domain operations. */
+	void				*memory_domain_ctx;
 
 	struct spdk_bdev_io_wait_entry	bdev_io_wait;
 	spdk_nvmf_nvme_passthru_cmd_cb	cmd_cb_fn;
@@ -138,7 +143,7 @@ struct spdk_nvmf_transport_poll_group {
 	struct spdk_nvmf_transport					*transport;
 	/* Requests that are waiting to obtain a data buffer */
 	STAILQ_HEAD(, spdk_nvmf_request)				pending_buf_queue;
-	struct spdk_iobuf_channel					buf_cache;
+	struct spdk_iobuf_channel					*buf_cache;
 	struct spdk_nvmf_poll_group					*group;
 	TAILQ_ENTRY(spdk_nvmf_transport_poll_group)			link;
 };
@@ -416,6 +421,14 @@ struct spdk_nvmf_transport_ops {
 	void (*subsystem_remove_host)(struct spdk_nvmf_transport *transport,
 				      const struct spdk_nvmf_subsystem *subsystem,
 				      const char *hostnqn);
+
+	/*
+	 * A callback used to dump subsystem's host data for a specific transport.
+	 * This callback is optional and not all transports need to implement it.
+	 */
+	void (*subsystem_dump_host)(struct spdk_nvmf_transport *transport,
+				    const struct spdk_nvmf_subsystem *subsystem,
+				    const char *hostnqn, struct spdk_json_write_ctx *w);
 };
 
 /**

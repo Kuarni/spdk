@@ -58,6 +58,8 @@ struct bdev_rbd {
 	TAILQ_ENTRY(bdev_rbd) tailq;
 	struct spdk_poller *reset_timer;
 	struct spdk_bdev_io *reset_bdev_io;
+
+	uint64_t rbd_watch_handle;
 };
 
 struct bdev_rbd_io_channel {
@@ -87,6 +89,33 @@ struct bdev_rbd_cluster {
 static STAILQ_HEAD(, bdev_rbd_cluster) g_map_bdev_rbd_cluster = STAILQ_HEAD_INITIALIZER(
 			g_map_bdev_rbd_cluster);
 static pthread_mutex_t g_map_bdev_rbd_cluster_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct spdk_io_channel *bdev_rbd_get_io_channel(void *ctx);
+
+static void
+_rbd_update_callback(void *arg)
+{
+	struct bdev_rbd *rbd = arg;
+	uint64_t current_size_in_bytes = 0;
+	int rc;
+
+	rc = rbd_get_size(rbd->image, &current_size_in_bytes);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed getting size %d\n", rc);
+		return;
+	}
+
+	rc = spdk_bdev_notify_blockcnt_change(&rbd->disk, current_size_in_bytes / rbd->disk.blocklen);
+	if (rc != 0) {
+		SPDK_ERRLOG("failed to notify block cnt change.\n");
+	}
+}
+
+static void
+rbd_update_callback(void *arg)
+{
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), _rbd_update_callback, arg);
+}
 
 static void
 bdev_rbd_cluster_free(struct bdev_rbd_cluster *entry)
@@ -155,6 +184,7 @@ bdev_rbd_free(struct bdev_rbd *rbd)
 	}
 
 	if (rbd->image) {
+		rbd_update_unwatch(rbd->image, rbd->rbd_watch_handle);
 		rbd_flush(rbd->image);
 		rbd_close(rbd->image);
 	}
@@ -400,6 +430,11 @@ bdev_rbd_init_context(void *arg)
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to open specified rbd device\n");
 		return NULL;
+	}
+
+	rc = rbd_update_watch(rbd->image, &rbd->rbd_watch_handle, rbd_update_callback, (void *)rbd);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to set up watch %d\n", rc);
 	}
 
 	rc = rbd_stat(rbd->image, &rbd->info, sizeof(rbd->info));
@@ -884,7 +919,6 @@ static void
 bdev_rbd_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 {
 	struct bdev_rbd *rbd = bdev->ctxt;
-	char uuid_str[SPDK_UUID_STRING_LEN];
 
 	spdk_json_write_object_begin(w);
 
@@ -910,8 +944,7 @@ bdev_rbd_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 		spdk_json_write_object_end(w);
 	}
 
-	spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &bdev->uuid);
-	spdk_json_write_named_string(w, "uuid", uuid_str);
+	spdk_json_write_named_uuid(w, "uuid", &bdev->uuid);
 
 	spdk_json_write_object_end(w);
 
@@ -1303,10 +1336,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		return ret;
 	}
 
-	if (uuid) {
-		rbd->disk.uuid = *uuid;
-	}
-
+	rbd->disk.uuid = *uuid;
 	if (name) {
 		rbd->disk.name = strdup(name);
 	} else {
@@ -1365,8 +1395,7 @@ bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb)
 {
 	struct spdk_bdev_desc *desc;
 	struct spdk_bdev *bdev;
-	struct spdk_io_channel *ch;
-	struct bdev_rbd_io_channel *rbd_io_ch;
+	struct bdev_rbd *rbd;
 	int rc = 0;
 	uint64_t new_size_in_byte;
 	uint64_t current_size_in_mb;
@@ -1390,12 +1419,9 @@ bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb)
 		goto exit;
 	}
 
-	ch = bdev_rbd_get_io_channel(bdev);
-	rbd_io_ch = spdk_io_channel_get_ctx(ch);
+	rbd = SPDK_CONTAINEROF(bdev, struct bdev_rbd, disk);
 	new_size_in_byte = new_size_in_mb * 1024 * 1024;
-
-	rc = rbd_resize(rbd_io_ch->disk->image, new_size_in_byte);
-	spdk_put_io_channel(ch);
+	rc = rbd_resize(rbd->image, new_size_in_byte);
 	if (rc != 0) {
 		SPDK_ERRLOG("failed to resize the ceph bdev.\n");
 		goto exit;

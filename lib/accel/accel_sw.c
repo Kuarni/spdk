@@ -25,9 +25,6 @@
 #endif
 #endif
 
-#define ACCEL_AES_XTS_128_KEY_SIZE 16
-#define ACCEL_AES_XTS_256_KEY_SIZE 32
-
 /* Per the AES-XTS spec, the size of data unit cannot be bigger than 2^20 blocks, 128b each block */
 #define ACCEL_AES_XTS_MAX_BLOCK_SIZE (1 << 24)
 
@@ -54,7 +51,7 @@ static struct spdk_accel_module_if g_sw_module;
 static void sw_accel_crypto_key_deinit(struct spdk_accel_crypto_key *_key);
 static int sw_accel_crypto_key_init(struct spdk_accel_crypto_key *key);
 static bool sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode);
-static bool sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher);
+static bool sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size);
 
 /* Post SW completions to a list and complete in a poller as we don't want to
  * complete them on the caller's stack as they'll likely submit another. */
@@ -66,20 +63,20 @@ _add_to_comp_list(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *acc
 }
 
 static bool
-sw_accel_supports_opcode(enum accel_opcode opc)
+sw_accel_supports_opcode(enum spdk_accel_opcode opc)
 {
 	switch (opc) {
-	case ACCEL_OPC_COPY:
-	case ACCEL_OPC_FILL:
-	case ACCEL_OPC_DUALCAST:
-	case ACCEL_OPC_COMPARE:
-	case ACCEL_OPC_CRC32C:
-	case ACCEL_OPC_COPY_CRC32C:
-	case ACCEL_OPC_COMPRESS:
-	case ACCEL_OPC_DECOMPRESS:
-	case ACCEL_OPC_ENCRYPT:
-	case ACCEL_OPC_DECRYPT:
-	case ACCEL_OPC_XOR:
+	case SPDK_ACCEL_OPC_COPY:
+	case SPDK_ACCEL_OPC_FILL:
+	case SPDK_ACCEL_OPC_DUALCAST:
+	case SPDK_ACCEL_OPC_COMPARE:
+	case SPDK_ACCEL_OPC_CRC32C:
+	case SPDK_ACCEL_OPC_COPY_CRC32C:
+	case SPDK_ACCEL_OPC_COMPRESS:
+	case SPDK_ACCEL_OPC_DECOMPRESS:
+	case SPDK_ACCEL_OPC_ENCRYPT:
+	case SPDK_ACCEL_OPC_DECRYPT:
+	case SPDK_ACCEL_OPC_XOR:
 		return true;
 	default:
 		return false;
@@ -453,45 +450,45 @@ sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_
 
 	do {
 		switch (accel_task->op_code) {
-		case ACCEL_OPC_COPY:
+		case SPDK_ACCEL_OPC_COPY:
 			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
-		case ACCEL_OPC_FILL:
+		case SPDK_ACCEL_OPC_FILL:
 			rc = _sw_accel_fill(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->fill_pattern);
 			break;
-		case ACCEL_OPC_DUALCAST:
+		case SPDK_ACCEL_OPC_DUALCAST:
 			rc = _sw_accel_dualcast_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 						     accel_task->d2.iovs, accel_task->d2.iovcnt,
 						     accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
-		case ACCEL_OPC_COMPARE:
+		case SPDK_ACCEL_OPC_COMPARE:
 			rc = _sw_accel_compare(accel_task->s.iovs, accel_task->s.iovcnt,
 					       accel_task->s2.iovs, accel_task->s2.iovcnt);
 			break;
-		case ACCEL_OPC_CRC32C:
+		case SPDK_ACCEL_OPC_CRC32C:
 			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs, accel_task->s.iovcnt, accel_task->seed);
 			break;
-		case ACCEL_OPC_COPY_CRC32C:
+		case SPDK_ACCEL_OPC_COPY_CRC32C:
 			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->s.iovs, accel_task->s.iovcnt);
 			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs,
 					  accel_task->s.iovcnt, accel_task->seed);
 			break;
-		case ACCEL_OPC_COMPRESS:
+		case SPDK_ACCEL_OPC_COMPRESS:
 			rc = _sw_accel_compress(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_DECOMPRESS:
+		case SPDK_ACCEL_OPC_DECOMPRESS:
 			rc = _sw_accel_decompress(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_XOR:
+		case SPDK_ACCEL_OPC_XOR:
 			rc = _sw_accel_xor(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_ENCRYPT:
+		case SPDK_ACCEL_OPC_ENCRYPT:
 			rc = _sw_accel_encrypt(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_DECRYPT:
+		case SPDK_ACCEL_OPC_DECRYPT:
 			rc = _sw_accel_decrypt(sw_ch, accel_task);
 			break;
 		default:
@@ -508,26 +505,6 @@ sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_
 
 	return 0;
 }
-
-static struct spdk_io_channel *sw_accel_get_io_channel(void);
-static int sw_accel_module_init(void);
-static void sw_accel_module_fini(void *ctxt);
-static size_t sw_accel_module_get_ctx_size(void);
-
-static struct spdk_accel_module_if g_sw_module = {
-	.module_init		= sw_accel_module_init,
-	.module_fini		= sw_accel_module_fini,
-	.write_config_json	= NULL,
-	.get_ctx_size		= sw_accel_module_get_ctx_size,
-	.name			= "software",
-	.supports_opcode	= sw_accel_supports_opcode,
-	.get_io_channel		= sw_accel_get_io_channel,
-	.submit_tasks		= sw_accel_submit_tasks,
-	.crypto_key_init	= sw_accel_crypto_key_init,
-	.crypto_key_deinit	= sw_accel_crypto_key_deinit,
-	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
-	.crypto_supports_cipher	= sw_accel_crypto_supports_cipher,
-};
 
 static int
 accel_comp_poll(void *arg)
@@ -602,7 +579,6 @@ sw_accel_module_get_ctx_size(void)
 static int
 sw_accel_module_init(void)
 {
-	SPDK_NOTICELOG("Accel framework software module initialized.\n");
 	spdk_io_device_register(&g_sw_module, sw_accel_create_cb, sw_accel_destroy_cb,
 				sizeof(struct sw_accel_io_channel), "sw_accel_module");
 
@@ -628,17 +604,16 @@ sw_accel_create_aes_xts(struct spdk_accel_crypto_key *key)
 	}
 
 	switch (key->key_size) {
-	case ACCEL_AES_XTS_128_KEY_SIZE:
+	case SPDK_ACCEL_AES_XTS_128_KEY_SIZE:
 		key_data->encrypt = XTS_AES_128_enc;
 		key_data->decrypt = XTS_AES_128_dec;
 		break;
-	case ACCEL_AES_XTS_256_KEY_SIZE:
+	case SPDK_ACCEL_AES_XTS_256_KEY_SIZE:
 		key_data->encrypt = XTS_AES_256_enc;
 		key_data->decrypt = XTS_AES_256_dec;
 		break;
 	default:
-		SPDK_ERRLOG("Incorrect key size  %zu, should be %d for AEX_XTS_128 or %d for AES_XTS_256\n",
-			    key->key_size, ACCEL_AES_XTS_128_KEY_SIZE, ACCEL_AES_XTS_256_KEY_SIZE);
+		assert(0);
 		free(key_data);
 		return -EINVAL;
 	}
@@ -674,9 +649,41 @@ sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode
 }
 
 static bool
-sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher)
+sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size)
 {
-	return cipher == SPDK_ACCEL_CIPHER_AES_XTS;
+	switch (cipher) {
+	case SPDK_ACCEL_CIPHER_AES_XTS:
+		return key_size == SPDK_ACCEL_AES_XTS_128_KEY_SIZE || key_size == SPDK_ACCEL_AES_XTS_256_KEY_SIZE;
+	default:
+		return false;
+	}
 }
+
+static int
+sw_accel_get_operation_info(enum spdk_accel_opcode opcode,
+			    const struct spdk_accel_operation_exec_ctx *ctx,
+			    struct spdk_accel_opcode_info *info)
+{
+	info->required_alignment = 0;
+
+	return 0;
+}
+
+static struct spdk_accel_module_if g_sw_module = {
+	.module_init			= sw_accel_module_init,
+	.module_fini			= sw_accel_module_fini,
+	.write_config_json		= NULL,
+	.get_ctx_size			= sw_accel_module_get_ctx_size,
+	.name				= "software",
+	.priority			= SPDK_ACCEL_SW_PRIORITY,
+	.supports_opcode		= sw_accel_supports_opcode,
+	.get_io_channel			= sw_accel_get_io_channel,
+	.submit_tasks			= sw_accel_submit_tasks,
+	.crypto_key_init		= sw_accel_crypto_key_init,
+	.crypto_key_deinit		= sw_accel_crypto_key_deinit,
+	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
+	.crypto_supports_cipher		= sw_accel_crypto_supports_cipher,
+	.get_operation_info		= sw_accel_get_operation_info,
+};
 
 SPDK_ACCEL_MODULE_REGISTER(sw, &g_sw_module)

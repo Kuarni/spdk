@@ -11,6 +11,7 @@
 #include "ftl_internal.h"
 #include "ftl_nv_cache.h"
 #include "ftl_debug.h"
+#include "ftl_utils.h"
 
 void
 ftl_mngt_check_conf(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mngt)
@@ -182,6 +183,9 @@ ftl_mngt_finalize_startup(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mng
 		dev->unmap_in_progress = true;
 	}
 
+	ftl_property_register(dev, "superblock_version", &dev->sb->header.version,
+			      sizeof(dev->sb->header.version), ftl_property_dump_uint64);
+
 	/* Clear the limit applications as they're incremented incorrectly by
 	 * the initialization code.
 	 */
@@ -321,4 +325,57 @@ ftl_mngt_deinit_unmap_map(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mng
 	dev->unmap_map_md = NULL;
 
 	ftl_mngt_next_step(mngt);
+}
+
+struct ftl_get_properties_ctx {
+	struct spdk_ftl_dev *dev;
+	struct spdk_jsonrpc_request *request;
+	spdk_ftl_fn cb_fn;
+	void *cb_arg;
+	struct spdk_thread *cb_thread;
+};
+
+static void
+ftl_get_properties_cb(void *arg)
+{
+	struct ftl_get_properties_ctx *ctx = arg;
+
+	ctx->cb_fn(ctx->cb_arg, 0);
+	free(ctx);
+}
+
+static void
+ftl_get_properties_msg(void *arg)
+{
+	struct ftl_get_properties_ctx *ctx = arg;
+	int rc;
+
+	ftl_property_dump(ctx->dev, ctx->request);
+	rc = spdk_thread_send_msg(ctx->cb_thread, ftl_get_properties_cb, ctx);
+	ftl_bug(rc);
+}
+
+int
+spdk_ftl_get_properties(struct spdk_ftl_dev *dev, struct spdk_jsonrpc_request *request,
+			spdk_ftl_fn cb_fn, void *cb_arg)
+{
+	int rc;
+	struct ftl_get_properties_ctx *ctx = calloc(1, sizeof(*ctx));
+
+	if (ctx == NULL) {
+		return -ENOMEM;
+	}
+	ctx->dev = dev;
+	ctx->request = request;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+	ctx->cb_thread = spdk_get_thread();
+
+	rc = spdk_thread_send_msg(dev->core_thread, ftl_get_properties_msg, ctx);
+	if (rc) {
+		free(ctx);
+		return rc;
+	}
+
+	return rc;
 }

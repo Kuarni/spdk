@@ -48,6 +48,77 @@ struct nvmf_qpair_disconnect_many_ctx {
 	void *cpl_ctx;
 };
 
+static struct spdk_nvmf_referral *
+nvmf_tgt_find_referral(struct spdk_nvmf_tgt *tgt,
+		       const struct spdk_nvme_transport_id *trid)
+{
+	struct spdk_nvmf_referral *referral;
+
+	TAILQ_FOREACH(referral, &tgt->referrals, link) {
+		if (spdk_nvme_transport_id_compare(&referral->trid, trid) == 0) {
+			return referral;
+		}
+	}
+
+	return NULL;
+}
+
+int
+spdk_nvmf_tgt_add_referral(struct spdk_nvmf_tgt *tgt,
+			   struct spdk_nvme_transport_id *trid,
+			   bool secure_channel)
+{
+	struct spdk_nvmf_referral *referral;
+
+	/* If the entry already exists, just ignore it. */
+	if (nvmf_tgt_find_referral(tgt, trid)) {
+		return 0;
+	}
+
+	referral = calloc(1, sizeof(*referral));
+	if (!referral) {
+		SPDK_ERRLOG("Failed to allocate memory for a referral\n");
+		return -ENOMEM;
+	}
+
+	referral->entry.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY;
+	referral->entry.treq.secure_channel = secure_channel ?
+					      SPDK_NVMF_TREQ_SECURE_CHANNEL_REQUIRED
+					      : SPDK_NVMF_TREQ_SECURE_CHANNEL_NOT_REQUIRED;
+	referral->entry.cntlid =
+		0xffff; /* Discovery controller shall support the dynamic controller model */
+	referral->entry.trtype = trid->trtype;
+	referral->entry.adrfam = trid->adrfam;
+	snprintf(referral->entry.subnqn, sizeof(referral->entry.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
+	memcpy(&referral->trid, trid, sizeof(struct spdk_nvme_transport_id));
+	spdk_strcpy_pad(referral->entry.trsvcid, trid->trsvcid, sizeof(referral->entry.trsvcid), ' ');
+	spdk_strcpy_pad(referral->entry.traddr, trid->traddr, sizeof(referral->entry.traddr), ' ');
+
+	TAILQ_INSERT_HEAD(&tgt->referrals, referral, link);
+	nvmf_update_discovery_log(tgt, NULL);
+
+	return 0;
+}
+
+int
+spdk_nvmf_tgt_remove_referral(struct spdk_nvmf_tgt *tgt,
+			      struct spdk_nvme_transport_id *trid)
+{
+	struct spdk_nvmf_referral *referral;
+
+	referral = nvmf_tgt_find_referral(tgt, trid);
+	if (referral == NULL) {
+		return -ENOENT;
+	}
+
+	TAILQ_REMOVE(&tgt->referrals, referral, link);
+	nvmf_update_discovery_log(tgt, NULL);
+
+	free(referral);
+
+	return 0;
+}
+
 static void
 nvmf_qpair_set_state(struct spdk_nvmf_qpair *qpair,
 		     enum spdk_nvmf_qpair_state state)
@@ -310,6 +381,7 @@ spdk_nvmf_tgt_create(struct spdk_nvmf_target_opts *opts)
 	tgt->discovery_genctr = 0;
 	TAILQ_INIT(&tgt->transports);
 	TAILQ_INIT(&tgt->poll_groups);
+	TAILQ_INIT(&tgt->referrals);
 	tgt->num_poll_groups = 0;
 
 	tgt->subsystem_ids = spdk_bit_array_create(tgt->max_subsystems);
@@ -364,6 +436,12 @@ nvmf_tgt_destroy_cb(void *io_device)
 	struct spdk_nvmf_tgt *tgt = io_device;
 	struct spdk_nvmf_subsystem *subsystem, *subsystem_next;
 	int rc;
+	struct spdk_nvmf_referral *referral;
+
+	while ((referral = TAILQ_FIRST(&tgt->referrals))) {
+		TAILQ_REMOVE(&tgt->referrals, referral, link);
+		free(referral);
+	}
 
 	/* We will be freeing subsystems in this loop, so we always need to get the next one
 	 * ahead of time, since we can't call get_next() on a subsystem that's been freed.
@@ -461,7 +539,7 @@ nvmf_write_subsystem_config_json(struct spdk_json_write_ctx *w,
 	struct spdk_nvmf_ns *ns;
 	struct spdk_nvmf_ns_opts ns_opts;
 	uint32_t max_namespaces;
-	char uuid_str[SPDK_UUID_STRING_LEN];
+	struct spdk_nvmf_transport *transport;
 
 	if (spdk_nvmf_subsystem_get_type(subsystem) != SPDK_NVMF_SUBTYPE_NVME) {
 		return;
@@ -505,6 +583,12 @@ nvmf_write_subsystem_config_json(struct spdk_json_write_ctx *w,
 		spdk_json_write_named_string(w, "nqn", spdk_nvmf_subsystem_get_nqn(subsystem));
 		spdk_json_write_named_string(w, "host", spdk_nvmf_host_get_nqn(host));
 
+		TAILQ_FOREACH(transport, &subsystem->tgt->transports, link) {
+			if (transport->ops->subsystem_dump_host != NULL) {
+				transport->ops->subsystem_dump_host(transport, subsystem, host->nqn, w);
+			}
+		}
+
 		/*     } "params" */
 		spdk_json_write_object_end(w);
 
@@ -542,8 +626,7 @@ nvmf_write_subsystem_config_json(struct spdk_json_write_ctx *w,
 		}
 
 		if (!spdk_uuid_is_null(&ns_opts.uuid)) {
-			spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &ns_opts.uuid);
-			spdk_json_write_named_string(w, "uuid",  uuid_str);
+			spdk_json_write_named_uuid(w, "uuid",  &ns_opts.uuid);
 		}
 
 		if (nvmf_subsystem_get_ana_reporting(subsystem)) {
@@ -562,6 +645,7 @@ nvmf_write_subsystem_config_json(struct spdk_json_write_ctx *w,
 
 	for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
 	     listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
+		transport = listener->transport;
 		trid = spdk_nvmf_subsystem_listener_get_trid(listener);
 
 		spdk_json_write_object_begin(w);
@@ -571,7 +655,15 @@ nvmf_write_subsystem_config_json(struct spdk_json_write_ctx *w,
 		spdk_json_write_named_object_begin(w, "params");
 
 		spdk_json_write_named_string(w, "nqn", spdk_nvmf_subsystem_get_nqn(subsystem));
-		nvmf_transport_listen_dump_opts(listener->transport, trid, w);
+
+		spdk_json_write_named_object_begin(w, "listen_address");
+		nvmf_transport_listen_dump_trid(trid, w);
+		spdk_json_write_object_end(w);
+		if (transport->ops->listen_dump_opts) {
+			transport->ops->listen_dump_opts(transport, trid, w);
+		}
+
+		spdk_json_write_named_bool(w, "secure_channel", listener->opts.secure_channel);
 
 		/*     } "params" */
 		spdk_json_write_object_end(w);
@@ -1232,7 +1324,7 @@ _nvmf_qpair_disconnect_msg(void *ctx)
 	free(ctx);
 }
 
-SPDK_LOG_DEPRECATION_REGISTER(spdk_nvmf_qpair_disconnect, "cb_fn and ctx are deprecated", "v23.09",
+SPDK_LOG_DEPRECATION_REGISTER(spdk_nvmf_qpair_disconnect, "cb_fn and ctx are deprecated", "v24.01",
 			      0);
 
 int

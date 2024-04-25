@@ -4,7 +4,7 @@
  *   All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/ut_multithread.c"
 #include "spdk_internal/mock.h"
@@ -75,6 +75,8 @@ DEFINE_STUB_V(spdk_accel_put_buf, (struct spdk_io_channel *ch, void *buf,
 DEFINE_STUB(spdk_bdev_get_memory_domains, int,
 	    (struct spdk_bdev *bdev, struct spdk_memory_domain **domains, int sz), 0);
 DEFINE_STUB(spdk_accel_get_memory_domain, struct spdk_memory_domain *, (void), (void *)0xdeadbeef);
+DEFINE_STUB(spdk_accel_get_buf_align, uint8_t,
+	    (enum spdk_accel_opcode opcode, const struct spdk_accel_operation_exec_ctx *ctx), 0);
 
 /* global vars and setup/cleanup functions used for all test functions */
 struct spdk_bdev_io *g_bdev_io;
@@ -466,7 +468,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("crypto", test_setup, test_cleanup);
@@ -481,12 +482,10 @@ main(int argc, char **argv)
 	allocate_threads(1);
 	set_thread(0);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
 	free_threads();
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 	return num_failures;
 }

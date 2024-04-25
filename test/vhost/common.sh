@@ -31,6 +31,7 @@ mkdir -p $TARGET_DIR
 # Source config describing QEMU and VHOST cores and NUMA
 #
 source $rootdir/test/vhost/common/autotest.config
+source "$rootdir/test/scheduler/common.sh"
 
 function vhosttestinit() {
 	if [ "$TEST_MODE" == "iso" ]; then
@@ -116,11 +117,12 @@ function vhost_run() {
 	local vhost_name
 	local run_gen_nvme=true
 	local vhost_bin="vhost"
+	local vhost_args=()
+	local cmd=()
 
-	while getopts "n:a:b:g" optchar; do
+	while getopts "n:b:g" optchar; do
 		case "$optchar" in
 			n) vhost_name="$OPTARG" ;;
-			a) vhost_args="$OPTARG" ;;
 			b) vhost_bin="$OPTARG" ;;
 			g)
 				run_gen_nvme=false
@@ -132,6 +134,9 @@ function vhost_run() {
 				;;
 		esac
 	done
+	shift $((OPTIND - 1))
+
+	vhost_args=("$@")
 
 	if [[ -z "$vhost_name" ]]; then
 		error "vhost name must be provided to vhost_run"
@@ -154,21 +159,21 @@ function vhost_run() {
 		return 1
 	fi
 
-	local cmd="$vhost_app -r $vhost_dir/rpc.sock $vhost_args"
+	cmd=("$vhost_app" "-r" "$vhost_dir/rpc.sock" "${vhost_args[@]}")
 	if [[ "$vhost_bin" =~ vhost ]]; then
-		cmd+=" -S $vhost_dir"
+		cmd+=(-S "$vhost_dir")
 	fi
 
 	notice "Loging to:   $vhost_log_file"
 	notice "Socket:      $vhost_socket"
-	notice "Command:     $cmd"
+	notice "Command:     ${cmd[*]}"
 
 	timing_enter vhost_start
 
 	iobuf_small_count=${iobuf_small_count:-16383}
 	iobuf_large_count=${iobuf_large_count:-2047}
 
-	$cmd --wait-for-rpc &
+	"${cmd[@]}" --wait-for-rpc &
 	vhost_pid=$!
 	echo $vhost_pid > $vhost_pid_file
 
@@ -184,7 +189,7 @@ function vhost_run() {
 		framework_start_init
 
 	#do not generate nvmes if pci access is disabled
-	if [[ "$cmd" != *"--no-pci"* ]] && [[ "$cmd" != *"-u"* ]] && $run_gen_nvme; then
+	if [[ "${cmd[*]}" != *"--no-pci"* ]] && [[ "${cmd[*]}" != *"-u"* ]] && $run_gen_nvme; then
 		$rootdir/scripts/gen_nvme.sh | $rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_subsystem_config
 	fi
 
@@ -451,13 +456,10 @@ function vm_kill() {
 # List all VM numbers in VM_DIR
 #
 function vm_list_all() {
-	local vms
-	vms="$(
-		shopt -s nullglob
-		echo $VM_DIR/[0-9]*
-	)"
-	if [[ -n "$vms" ]]; then
-		basename --multiple $vms
+	local vms=()
+	vms=("$VM_DIR"/+([0-9]))
+	if ((${#vms[@]} > 0)); then
+		basename --multiple "${vms[@]}"
 	fi
 }
 
@@ -800,6 +802,7 @@ function vm_setup() {
 	notice "Saving to $vm_dir/run.sh"
 	cat <<- RUN > "$vm_dir/run.sh"
 		#!/bin/bash
+		shopt -s nullglob extglob
 		rootdir=$rootdir
 		source "\$rootdir/test/scheduler/common.sh"
 		qemu_log () {
@@ -1408,4 +1411,39 @@ function get_free_tcp_port() {
 	done
 
 	echo "$port"
+}
+
+function limit_vhost_kernel_threads() {
+	local cpus=$1 nodes cpu _cpus=() _nodes=()
+	local _pids=() pid cgroup pid
+
+	xtrace_disable_per_cmd map_cpus
+
+	_cpus=($(parse_cpu_list <(echo "$cpus")))
+
+	for cpu in "${_cpus[@]}"; do
+		_nodes+=("${cpu_node_map[cpu]}")
+	done
+
+	nodes=$(fold_array_onto_string "${_nodes[@]}")
+
+	# vhost kernel threads are named as vhost-PID
+	_pids=($(pgrep vhost))
+	((${#_pids[@]} > 0)) || return 1
+
+	# All threads should be located under the same initial cgroup. kthreadd does not put them
+	# under root cgroup, but rather the cgroup of a session from which target/vhost was configured.
+	# We create dedicated cgroup under the initial one to move all the threads only once instead of
+	# having an extra step of moving them to the root cgroup first.
+	set_cgroup_attr_top_bottom "${_pids[0]}" cgroup.subtree_control "+cpuset"
+
+	cgroup=$(get_cgroup "${_pids[0]}")
+	create_cgroup "$cgroup/vhost"
+
+	set_cgroup_attr "$cgroup/vhost" cpuset.cpus "$cpus"
+	set_cgroup_attr "$cgroup/vhost" cpuset.mems "$nodes"
+
+	for pid in "${_pids[@]}"; do
+		move_proc "$pid" "$cgroup/vhost" "$cgroup" cgroup.threads
+	done
 }

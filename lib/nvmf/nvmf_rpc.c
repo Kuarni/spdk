@@ -18,7 +18,7 @@
 
 #include "nvmf_internal.h"
 
-static bool g_tls_log = false;
+static bool g_logged_deprecated_nvmf_get_subsystems = false;
 
 static int
 json_write_hex_str(struct spdk_json_write_ctx *w, const void *data, size_t size)
@@ -144,21 +144,6 @@ decode_ns_eui64(const struct spdk_json_val *val, void *out)
 	return rc;
 }
 
-static int
-decode_ns_uuid(const struct spdk_json_val *val, void *out)
-{
-	char *str = NULL;
-	int rc;
-
-	rc = spdk_json_decode_string(val, &str);
-	if (rc == 0) {
-		rc = spdk_uuid_parse(out, str);
-	}
-
-	free(str);
-	return rc;
-}
-
 struct rpc_get_subsystem {
 	char *nqn;
 	char *tgt_name;
@@ -190,21 +175,15 @@ dump_nvmf_subsystem(struct spdk_json_write_ctx *w, struct spdk_nvmf_subsystem *s
 	for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
 	     listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
 		const struct spdk_nvme_transport_id *trid;
-		const char *adrfam;
 
 		trid = spdk_nvmf_subsystem_listener_get_trid(listener);
 
 		spdk_json_write_object_begin(w);
-		adrfam = spdk_nvme_transport_id_adrfam_str(trid->adrfam);
-		if (adrfam == NULL) {
-			adrfam = "unknown";
-		}
-		/* NOTE: "transport" is kept for compatibility; new code should use "trtype" */
+
+		/* NOTE: "transport" is kept for compatibility; new code should use "trtype". */
+		/* TODO: Remove after SPDK v23.09 release. */
 		spdk_json_write_named_string(w, "transport", trid->trstring);
-		spdk_json_write_named_string(w, "trtype", trid->trstring);
-		spdk_json_write_named_string(w, "adrfam", adrfam);
-		spdk_json_write_named_string(w, "traddr", trid->traddr);
-		spdk_json_write_named_string(w, "trsvcid", trid->trsvcid);
+		nvmf_transport_listen_dump_trid(trid, w);
 		spdk_json_write_object_end(w);
 	}
 	spdk_json_write_array_end(w);
@@ -262,10 +241,7 @@ dump_nvmf_subsystem(struct spdk_json_write_ctx *w, struct spdk_nvmf_subsystem *s
 			}
 
 			if (!spdk_uuid_is_null(&ns_opts.uuid)) {
-				char uuid_str[SPDK_UUID_STRING_LEN];
-
-				spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &ns_opts.uuid);
-				spdk_json_write_named_string(w, "uuid", uuid_str);
+				spdk_json_write_named_uuid(w, "uuid", &ns_opts.uuid);
 			}
 
 			if (nvmf_subsystem_get_ana_reporting(subsystem)) {
@@ -279,6 +255,10 @@ dump_nvmf_subsystem(struct spdk_json_write_ctx *w, struct spdk_nvmf_subsystem *s
 	spdk_json_write_object_end(w);
 }
 
+SPDK_LOG_DEPRECATION_REGISTER(rpc_nvmf_get_subsystems,
+			      "listener.transport is deprecated in favor of trtype",
+			      "v24.01", 0);
+
 static void
 rpc_nvmf_get_subsystems(struct spdk_jsonrpc_request *request,
 			const struct spdk_json_val *params)
@@ -287,6 +267,12 @@ rpc_nvmf_get_subsystems(struct spdk_jsonrpc_request *request,
 	struct spdk_json_write_ctx *w;
 	struct spdk_nvmf_subsystem *subsystem = NULL;
 	struct spdk_nvmf_tgt *tgt;
+
+	/* Log only once */
+	if (!g_logged_deprecated_nvmf_get_subsystems) {
+		SPDK_LOG_DEPRECATED(rpc_nvmf_get_subsystems);
+		g_logged_deprecated_nvmf_get_subsystems = true;
+	}
 
 	if (params) {
 		if (spdk_json_decode_object(params, rpc_get_subsystem_decoders,
@@ -624,7 +610,6 @@ enum nvmf_rpc_listen_op {
 struct nvmf_rpc_listener_ctx {
 	char				*nqn;
 	char				*tgt_name;
-	bool				secure_channel;
 	struct spdk_nvmf_tgt		*tgt;
 	struct spdk_nvmf_transport	*transport;
 	struct spdk_nvmf_subsystem	*subsystem;
@@ -638,13 +623,16 @@ struct nvmf_rpc_listener_ctx {
 	enum nvmf_rpc_listen_op		op;
 	bool				response_sent;
 	struct spdk_nvmf_listen_opts	opts;
+
+	/* Additional options for listener creation. */
+	struct spdk_nvmf_listener_opts	listener_opts;
 };
 
 static const struct spdk_json_object_decoder nvmf_rpc_listener_decoder[] = {
 	{"nqn", offsetof(struct nvmf_rpc_listener_ctx, nqn), spdk_json_decode_string},
 	{"listen_address", offsetof(struct nvmf_rpc_listener_ctx, address), decode_rpc_listen_address},
 	{"tgt_name", offsetof(struct nvmf_rpc_listener_ctx, tgt_name), spdk_json_decode_string, true},
-	{"secure_channel", offsetof(struct nvmf_rpc_listener_ctx, secure_channel), spdk_json_decode_bool, true},
+	{"secure_channel", offsetof(struct nvmf_rpc_listener_ctx, listener_opts.secure_channel), spdk_json_decode_bool, true},
 };
 
 static void
@@ -755,7 +743,8 @@ nvmf_rpc_listen_paused(struct spdk_nvmf_subsystem *subsystem,
 		if (!nvmf_subsystem_find_listener(subsystem, &ctx->trid)) {
 			rc = spdk_nvmf_tgt_listen_ext(ctx->tgt, &ctx->trid, &ctx->opts);
 			if (rc == 0) {
-				spdk_nvmf_subsystem_add_listener(ctx->subsystem, &ctx->trid, nvmf_rpc_subsystem_listen, ctx);
+				spdk_nvmf_subsystem_add_listener_ext(ctx->subsystem, &ctx->trid, nvmf_rpc_subsystem_listen, ctx,
+								     &ctx->listener_opts);
 				return;
 			}
 
@@ -858,6 +847,8 @@ rpc_nvmf_subsystem_add_listener(struct spdk_jsonrpc_request *request,
 
 	ctx->request = request;
 
+	spdk_nvmf_subsystem_listener_opts_init(&ctx->listener_opts, sizeof(ctx->listener_opts));
+
 	if (spdk_json_decode_object_relaxed(params, nvmf_rpc_listener_decoder,
 					    SPDK_COUNTOF(nvmf_rpc_listener_decoder),
 					    ctx)) {
@@ -897,17 +888,13 @@ rpc_nvmf_subsystem_add_listener(struct spdk_jsonrpc_request *request,
 	ctx->op = NVMF_RPC_LISTEN_ADD;
 	spdk_nvmf_listen_opts_init(&ctx->opts, sizeof(ctx->opts));
 	ctx->opts.transport_specific = params;
-	if (subsystem->flags.allow_any_host == 1 && ctx->secure_channel == true) {
+	if (subsystem->flags.allow_any_host == 1 && ctx->listener_opts.secure_channel == true) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "Cannot establish secure channel, when 'allow_any_host' is set");
 		nvmf_rpc_listener_ctx_free(ctx);
 		return;
 	}
-	ctx->opts.secure_channel = ctx->secure_channel;
-	if (ctx->opts.secure_channel && !g_tls_log) {
-		SPDK_NOTICELOG("TLS support is considered experimental\n");
-		g_tls_log = true;
-	}
+	ctx->opts.secure_channel = ctx->listener_opts.secure_channel;
 
 	rc = spdk_nvmf_subsystem_pause(subsystem, 0, nvmf_rpc_listen_paused, ctx);
 	if (rc != 0) {
@@ -1000,6 +987,241 @@ rpc_nvmf_subsystem_remove_listener(struct spdk_jsonrpc_request *request,
 	}
 }
 SPDK_RPC_REGISTER("nvmf_subsystem_remove_listener", rpc_nvmf_subsystem_remove_listener,
+		  SPDK_RPC_RUNTIME);
+
+struct nvmf_rpc_referral_ctx {
+	char				*tgt_name;
+	struct spdk_nvmf_tgt		*tgt;
+	struct spdk_nvmf_transport	*transport;
+	struct spdk_nvmf_subsystem	*subsystem;
+	struct rpc_listen_address	address;
+	struct spdk_jsonrpc_request	*request;
+	struct spdk_nvme_transport_id	trid;
+	bool				response_sent;
+	bool				secure_channel;
+};
+
+static const struct spdk_json_object_decoder nvmf_rpc_referral_decoder[] = {
+	{"address", offsetof(struct nvmf_rpc_referral_ctx, address), decode_rpc_listen_address},
+	{"tgt_name", offsetof(struct nvmf_rpc_referral_ctx, tgt_name), spdk_json_decode_string, true},
+	{"secure_channel", offsetof(struct nvmf_rpc_referral_ctx, secure_channel), spdk_json_decode_bool, true},
+};
+
+static void
+nvmf_rpc_referral_ctx_free(struct nvmf_rpc_referral_ctx *ctx)
+{
+	free(ctx->tgt_name);
+	free_rpc_listen_address(&ctx->address);
+	free(ctx);
+}
+
+static void
+rpc_nvmf_add_referral(struct spdk_jsonrpc_request *request,
+		      const struct spdk_json_val *params)
+{
+	struct nvmf_rpc_referral_ctx *ctx;
+	struct spdk_nvmf_tgt *tgt;
+	int rc;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
+
+	ctx->request = request;
+
+	if (spdk_json_decode_object_relaxed(params, nvmf_rpc_referral_decoder,
+					    SPDK_COUNTOF(nvmf_rpc_referral_decoder),
+					    ctx)) {
+		SPDK_ERRLOG("spdk_json_decode_object_relaxed failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	tgt = spdk_nvmf_get_tgt(ctx->tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+	ctx->tgt = tgt;
+
+	if (rpc_listen_address_to_trid(&ctx->address, &ctx->trid)) {
+		spdk_jsonrpc_send_error_response(ctx->request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	if ((ctx->trid.trtype == SPDK_NVME_TRANSPORT_TCP ||
+	     ctx->trid.trtype == SPDK_NVME_TRANSPORT_RDMA) &&
+	    !strlen(ctx->trid.trsvcid)) {
+		SPDK_ERRLOG("Service ID is required.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Service ID is required.");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	rc = spdk_nvmf_tgt_add_referral(tgt, &ctx->trid, ctx->secure_channel);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Internal error");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	nvmf_rpc_referral_ctx_free(ctx);
+
+	spdk_jsonrpc_send_bool_response(request, true);
+}
+
+SPDK_RPC_REGISTER("nvmf_discovery_add_referral", rpc_nvmf_add_referral,
+		  SPDK_RPC_RUNTIME);
+
+static void
+rpc_nvmf_remove_referral(struct spdk_jsonrpc_request *request,
+			 const struct spdk_json_val *params)
+{
+	struct nvmf_rpc_referral_ctx *ctx;
+	struct spdk_nvmf_tgt *tgt;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
+
+	ctx->request = request;
+
+	if (spdk_json_decode_object(params, nvmf_rpc_referral_decoder,
+				    SPDK_COUNTOF(nvmf_rpc_referral_decoder),
+				    ctx)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	tgt = spdk_nvmf_get_tgt(ctx->tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+	ctx->tgt = tgt;
+
+	if (rpc_listen_address_to_trid(&ctx->address, &ctx->trid)) {
+		spdk_jsonrpc_send_error_response(ctx->request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	if (spdk_nvmf_tgt_remove_referral(tgt, &ctx->trid)) {
+		SPDK_ERRLOG("Failed to remove referral.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to remove a referral.");
+		nvmf_rpc_referral_ctx_free(ctx);
+		return;
+	}
+
+	nvmf_rpc_referral_ctx_free(ctx);
+
+	spdk_jsonrpc_send_bool_response(request, true);
+}
+
+SPDK_RPC_REGISTER("nvmf_discovery_remove_referral", rpc_nvmf_remove_referral,
+		  SPDK_RPC_RUNTIME);
+
+static void
+dump_nvmf_referral(struct spdk_json_write_ctx *w,
+		   struct spdk_nvmf_referral *referral)
+{
+	spdk_json_write_object_begin(w);
+
+	spdk_json_write_named_object_begin(w, "address");
+	nvmf_transport_listen_dump_trid(&referral->trid, w);
+	spdk_json_write_object_end(w);
+	spdk_json_write_named_bool(w, "secure_channel",
+				   referral->entry.treq.secure_channel == SPDK_NVMF_TREQ_SECURE_CHANNEL_REQUIRED);
+
+	spdk_json_write_object_end(w);
+}
+
+struct rpc_get_referrals_ctx {
+	char *tgt_name;
+};
+
+static const struct spdk_json_object_decoder rpc_get_referrals_decoders[] = {
+	{"tgt_name", offsetof(struct rpc_get_referrals_ctx, tgt_name), spdk_json_decode_string, true},
+};
+
+static void
+free_rpc_get_referrals_ctx(struct rpc_get_referrals_ctx *ctx)
+{
+	free(ctx->tgt_name);
+	free(ctx);
+}
+
+static void
+rpc_nvmf_get_referrals(struct spdk_jsonrpc_request *request,
+		       const struct spdk_json_val *params)
+{
+	struct rpc_get_referrals_ctx *ctx;
+	struct spdk_nvmf_tgt *tgt;
+	struct spdk_json_write_ctx *w;
+	struct spdk_nvmf_referral *referral;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Out of memory");
+		return;
+	}
+
+	if (params) {
+		if (spdk_json_decode_object(params, rpc_get_referrals_decoders,
+					    SPDK_COUNTOF(rpc_get_referrals_decoders),
+					    ctx)) {
+			SPDK_ERRLOG("spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+							 "Invalid parameters");
+			free_rpc_get_referrals_ctx(ctx);
+			return;
+		}
+	}
+
+	tgt = spdk_nvmf_get_tgt(ctx->tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target");
+		free_rpc_get_referrals_ctx(ctx);
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+
+	spdk_json_write_array_begin(w);
+
+	TAILQ_FOREACH(referral, &tgt->referrals, link) {
+		dump_nvmf_referral(w, referral);
+	}
+
+	spdk_json_write_array_end(w);
+
+	spdk_jsonrpc_end_result(request, w);
+
+	free_rpc_get_referrals_ctx(ctx);
+}
+SPDK_RPC_REGISTER("nvmf_discovery_get_referrals", rpc_nvmf_get_referrals,
 		  SPDK_RPC_RUNTIME);
 
 static const struct spdk_json_object_decoder nvmf_rpc_set_ana_state_decoder[] = {
@@ -1121,7 +1343,7 @@ static const struct spdk_json_object_decoder rpc_ns_params_decoders[] = {
 	{"ptpl_file", offsetof(struct spdk_nvmf_ns_params, ptpl_file), spdk_json_decode_string, true},
 	{"nguid", offsetof(struct spdk_nvmf_ns_params, nguid), decode_ns_nguid, true},
 	{"eui64", offsetof(struct spdk_nvmf_ns_params, eui64), decode_ns_eui64, true},
-	{"uuid", offsetof(struct spdk_nvmf_ns_params, uuid), decode_ns_uuid, true},
+	{"uuid", offsetof(struct spdk_nvmf_ns_params, uuid), spdk_json_decode_uuid, true},
 	{"anagrpid", offsetof(struct spdk_nvmf_ns_params, anagrpid), spdk_json_decode_uint32, true},
 };
 
@@ -2199,17 +2421,13 @@ SPDK_RPC_REGISTER("nvmf_get_stats", rpc_nvmf_get_stats, SPDK_RPC_RUNTIME)
 static void
 dump_nvmf_ctrlr(struct spdk_json_write_ctx *w, struct spdk_nvmf_ctrlr *ctrlr)
 {
-	char uuid_str[SPDK_UUID_STRING_LEN] = {};
 	uint32_t count;
 
 	spdk_json_write_object_begin(w);
 
 	spdk_json_write_named_uint32(w, "cntlid", ctrlr->cntlid);
-
 	spdk_json_write_named_string(w, "hostnqn", ctrlr->hostnqn);
-
-	spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &ctrlr->hostid);
-	spdk_json_write_named_string(w, "hostid", uuid_str);
+	spdk_json_write_named_uuid(w, "hostid", &ctrlr->hostid);
 
 	count = spdk_bit_array_count_set(ctrlr->qpair_mask);
 	spdk_json_write_named_uint32(w, "num_io_qpairs", count);
@@ -2246,7 +2464,12 @@ dump_nvmf_qpair(struct spdk_json_write_ctx *w, struct spdk_nvmf_qpair *qpair)
 	spdk_json_write_named_string(w, "state", nvmf_qpair_state_str(qpair->state));
 
 	if (spdk_nvmf_qpair_get_listen_trid(qpair, &listen_trid) == 0) {
-		nvmf_transport_listen_dump_opts(qpair->transport, &listen_trid, w);
+		spdk_json_write_named_object_begin(w, "listen_address");
+		nvmf_transport_listen_dump_trid(&listen_trid, w);
+		spdk_json_write_object_end(w);
+		if (qpair->transport->ops->listen_dump_opts) {
+			qpair->transport->ops->listen_dump_opts(qpair->transport, &listen_trid, w);
+		}
 	}
 
 	spdk_json_write_object_end(w);
@@ -2276,20 +2499,12 @@ dump_nvmf_subsystem_listener(struct spdk_json_write_ctx *w,
 			     struct spdk_nvmf_subsystem_listener *listener)
 {
 	const struct spdk_nvme_transport_id *trid = listener->trid;
-	const char *adrfam;
 	uint32_t i;
 
 	spdk_json_write_object_begin(w);
 
 	spdk_json_write_named_object_begin(w, "address");
-	adrfam = spdk_nvme_transport_id_adrfam_str(trid->adrfam);
-	if (adrfam == NULL) {
-		adrfam = "unknown";
-	}
-	spdk_json_write_named_string(w, "trtype", trid->trstring);
-	spdk_json_write_named_string(w, "adrfam", adrfam);
-	spdk_json_write_named_string(w, "traddr", trid->traddr);
-	spdk_json_write_named_string(w, "trsvcid", trid->trsvcid);
+	nvmf_transport_listen_dump_trid(trid, w);
 	spdk_json_write_object_end(w);
 
 	if (nvmf_subsystem_get_ana_reporting(listener->subsystem)) {

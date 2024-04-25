@@ -50,6 +50,8 @@ if __name__ == "__main__":
                         help="""Set verbose level. """)
     parser.add_argument('--dry-run', dest='dry_run', action='store_true', help="Display request and exit")
     parser.set_defaults(dry_run=False)
+    parser.add_argument('--go-client', dest='go_client', action='store_true', help="Use Go client")
+    parser.set_defaults(go_client=False)
     parser.add_argument('--server', dest='is_server', action='store_true',
                         help="Start listening on stdin, parse each line as a regular rpc.py execution and create \
                                 a separate connection for each command. Each command's output ends with either \
@@ -204,7 +206,9 @@ if __name__ == "__main__":
         rpc.bdev.bdev_set_options(args.client,
                                   bdev_io_pool_size=args.bdev_io_pool_size,
                                   bdev_io_cache_size=args.bdev_io_cache_size,
-                                  bdev_auto_examine=args.bdev_auto_examine)
+                                  bdev_auto_examine=args.bdev_auto_examine,
+                                  iobuf_small_cache_size=args.iobuf_small_cache_size,
+                                  iobuf_large_cache_size=args.iobuf_large_cache_size)
 
     p = subparsers.add_parser('bdev_set_options',
                               help="""Set options of bdev subsystem""")
@@ -213,6 +217,8 @@ if __name__ == "__main__":
     group = p.add_mutually_exclusive_group()
     group.add_argument('-e', '--enable-auto-examine', dest='bdev_auto_examine', help='Allow to auto examine', action='store_true')
     group.add_argument('-d', '--disable-auto-examine', dest='bdev_auto_examine', help='Not allow to auto examine', action='store_false')
+    p.add_argument('--iobuf-small-cache-size', help='Size of the small iobuf per thread cache', type=int)
+    p.add_argument('--iobuf-large-cache-size', help='Size of the large iobuf per thread cache', type=int)
     p.set_defaults(bdev_auto_examine=True)
     p.set_defaults(func=bdev_set_options)
 
@@ -438,8 +444,7 @@ if __name__ == "__main__":
     p.add_argument('name', help='Block device name')
     p.add_argument('-u', '--uuid', help='UUID of the bdev')
     p.add_argument('total_size', help='Size of null bdev in MB (int > 0). Includes only data blocks.', type=int)
-    p.add_argument('block_size', help='Block size for this bdev.'
-                                      'Should be a sum of block size and metadata size if --md-size is used.', type=int)
+    p.add_argument('block_size', help='Data block size for this bdev.', type=int)
     p.add_argument('-p', '--physical-block-size', help='Physical block size for this bdev.', type=int)
     p.add_argument('-m', '--md-size', type=int,
                    help='Metadata size for this bdev. Default=0.')
@@ -566,7 +571,8 @@ if __name__ == "__main__":
                                        transport_tos=args.transport_tos,
                                        nvme_error_stat=args.nvme_error_stat,
                                        rdma_srq_size=args.rdma_srq_size,
-                                       io_path_stat=args.io_path_stat)
+                                       io_path_stat=args.io_path_stat,
+                                       allow_accel_sequence=args.allow_accel_sequence)
 
     p = subparsers.add_parser('bdev_nvme_set_options',
                               help='Set options for the bdev nvme type. This is startup command.')
@@ -644,6 +650,9 @@ if __name__ == "__main__":
     p.add_argument('--io-path-stat',
                    help="""Enable collecting I/O path stat of each io path.""",
                    action='store_true')
+    p.add_argument('--allow-accel-sequence',
+                   help='''Allow NVMe bdevs to advertise support for accel sequences if the
+                   controller also supports them.''', action='store_true')
 
     p.set_defaults(func=bdev_nvme_set_options)
 
@@ -1152,11 +1161,13 @@ if __name__ == "__main__":
     def bdev_passthru_create(args):
         print_json(rpc.bdev.bdev_passthru_create(args.client,
                                                  base_bdev_name=args.base_bdev_name,
-                                                 name=args.name))
+                                                 name=args.name,
+                                                 uuid=args.uuid))
 
     p = subparsers.add_parser('bdev_passthru_create', help='Add a pass through bdev on existing bdev')
     p.add_argument('-b', '--base-bdev-name', help="Name of the existing bdev", required=True)
     p.add_argument('-p', '--name', help="Name of the pass through bdev", required=True)
+    p.add_argument('-u', '--uuid', help="UUID of the bdev")
     p.set_defaults(func=bdev_passthru_create)
 
     def bdev_passthru_delete(args):
@@ -1263,15 +1274,18 @@ if __name__ == "__main__":
                                          io_type=args.io_type,
                                          error_type=args.error_type,
                                          num=args.num,
+                                         queue_depth=args.queue_depth,
                                          corrupt_offset=args.corrupt_offset,
                                          corrupt_value=args.corrupt_value)
 
     p = subparsers.add_parser('bdev_error_inject_error', help='bdev inject error')
     p.add_argument('name', help="""the name of the error injection bdev""")
     p.add_argument('io_type', help="""io_type: 'clear' 'read' 'write' 'unmap' 'flush' 'all'""")
-    p.add_argument('error_type', help="""error_type: 'failure' 'pending' 'corrupt_data'""")
+    p.add_argument('error_type', help="""error_type: 'failure' 'pending' 'corrupt_data' 'nomem'""")
     p.add_argument(
         '-n', '--num', help='the number of commands you want to fail', type=int)
+    p.add_argument(
+        '-q', '--queue-depth', help='the queue depth at which to trigger the error', type=int)
     p.add_argument(
         '-o', '--corrupt-offset', help='the offset in bytes to xor with corrupt_value', type=int)
     p.add_argument(
@@ -2115,13 +2129,16 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                                   strip_size_kb=args.strip_size_kb,
                                   raid_level=args.raid_level,
                                   base_bdevs=base_bdevs,
-                                  uuid=args.uuid)
+                                  uuid=args.uuid,
+                                  superblock=args.superblock)
     p = subparsers.add_parser('bdev_raid_create', help='Create new raid bdev')
     p.add_argument('-n', '--name', help='raid bdev name', required=True)
     p.add_argument('-z', '--strip-size-kb', help='strip size in KB', type=int)
     p.add_argument('-r', '--raid-level', help='raid level, raid0, raid1 and a special level concat are supported', required=True)
     p.add_argument('-b', '--base-bdevs', help='base bdevs name, whitespace separated list in quotes', required=True)
     p.add_argument('--uuid', help='UUID for this raid bdev', required=False)
+    p.add_argument('-s', '--superblock', help='information about raid bdev will be stored in superblock on each base bdev, '
+                                              'disabled by default due to backward compatibility', action='store_true')
     p.set_defaults(func=bdev_raid_create)
 
     def bdev_raid_delete(args):
@@ -2261,6 +2278,13 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p = subparsers.add_parser('bdev_ftl_get_stats', help='print ftl stats')
     p.add_argument('-b', '--name', help="Name of the bdev", required=True)
     p.set_defaults(func=bdev_ftl_get_stats)
+
+    def bdev_ftl_get_properties(args):
+        print_dict(rpc.bdev.bdev_ftl_get_properties(args.client, name=args.name))
+
+    p = subparsers.add_parser('bdev_ftl_get_properties', help='Print FTL properties')
+    p.add_argument('-b', '--name', help="Name of the bdev", required=True)
+    p.set_defaults(func=bdev_ftl_get_properties)
 
     # vmd
     def vmd_enable(args):
@@ -2530,6 +2554,44 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-g', '--anagrpid', help='ANA group ID (optional)', type=int)
     p.set_defaults(func=nvmf_subsystem_listener_set_ana_state)
 
+    def nvmf_discovery_add_referral(args):
+        rpc.nvmf.nvmf_discovery_add_referral(**vars(args))
+
+    p = subparsers.add_parser('nvmf_discovery_add_referral', help='Add a discovery service referral to an NVMe-oF target')
+    p.add_argument('-t', '--trtype', help='NVMe-oF transport type: e.g., rdma', required=True)
+    p.add_argument('-a', '--traddr', help='NVMe-oF transport address: e.g., an ip address', required=True)
+    p.add_argument('-p', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.add_argument('-f', '--adrfam', help='NVMe-oF transport adrfam: e.g., ipv4, ipv6, ib, fc, intra_host')
+    p.add_argument('-s', '--trsvcid', help='NVMe-oF transport service id: e.g., a port number (required for RDMA or TCP)')
+    p.add_argument('-k', '--secure-channel', help='The connection to that discovery subsystem requires a secure channel',
+                   action="store_true")
+    p.set_defaults(func=nvmf_discovery_add_referral)
+
+    def nvmf_discovery_remove_referral(args):
+        rpc.nvmf.nvmf_discovery_remove_referral(args.client,
+                                                trtype=args.trtype,
+                                                traddr=args.traddr,
+                                                tgt_name=args.tgt_name,
+                                                adrfam=args.adrfam,
+                                                trsvcid=args.trsvcid)
+
+    p = subparsers.add_parser('nvmf_discovery_remove_referral', help='Remove a discovery service referral from an NVMe-oF target')
+    p.add_argument('-t', '--trtype', help='NVMe-oF transport type: e.g., rdma', required=True)
+    p.add_argument('-a', '--traddr', help='NVMe-oF transport address: e.g., an ip address', required=True)
+    p.add_argument('-p', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.add_argument('-f', '--adrfam', help='NVMe-oF transport adrfam: e.g., ipv4, ipv6, ib, fc, intra_host')
+    p.add_argument('-s', '--trsvcid', help='NVMe-oF transport service id: e.g., a port number (required for TCP and RDMA transport types)')
+    p.set_defaults(func=nvmf_discovery_remove_referral)
+
+    def nvmf_discovery_get_referrals(args):
+        print_dict(rpc.nvmf.nvmf_discovery_get_referrals(args.client,
+                                                         tgt_name=args.tgt_name))
+
+    p = subparsers.add_parser('nvmf_discovery_get_referrals',
+                              help='Display discovery subsystem referrals of an NVMe-oF target')
+    p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.set_defaults(func=nvmf_discovery_get_referrals)
+
     def nvmf_subsystem_add_ns(args):
         rpc.nvmf.nvmf_subsystem_add_ns(args.client,
                                        nqn=args.nqn,
@@ -2705,12 +2767,22 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def vhost_create_scsi_controller(args):
         rpc.vhost.vhost_create_scsi_controller(args.client,
                                                ctrlr=args.ctrlr,
-                                               cpumask=args.cpumask)
+                                               cpumask=args.cpumask,
+                                               delay=args.delay)
 
     p = subparsers.add_parser('vhost_create_scsi_controller', help='Add new vhost controller')
     p.add_argument('ctrlr', help='controller name')
     p.add_argument('--cpumask', help='cpu mask for this controller')
+    p.add_argument("--delay", action='store_true', help='whether delay starting controller or not')
     p.set_defaults(func=vhost_create_scsi_controller)
+
+    def vhost_start_scsi_controller(args):
+        rpc.vhost.vhost_start_scsi_controller(args.client,
+                                              ctrlr=args.ctrlr)
+
+    p = subparsers.add_parser('vhost_start_scsi_controller', help='Start vhost scsi controller')
+    p.add_argument('ctrlr', help='controller name')
+    p.set_defaults(func=vhost_start_scsi_controller)
 
     def vhost_scsi_controller_add_target(args):
         print_json(rpc.vhost.vhost_scsi_controller_add_target(args.client,
@@ -2745,7 +2817,6 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('--transport', help='virtio blk transport name (default: vhost_user_blk)')
     p.add_argument("-r", "--readonly", action='store_true', help='Set controller as read-only')
     p.add_argument("-p", "--packed_ring", action='store_true', help='Set controller as packed ring supported')
-    p.add_argument("-l", "--packed_ring_recovery", action='store_true', help='Enable packed ring live recovery')
     p.set_defaults(func=vhost_create_blk_controller)
 
     def vhost_get_controllers(args):
@@ -3030,6 +3101,23 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-q', '--qp-size', type=int, help='QP size')
     p.add_argument('-r', '--num-requests', type=int, help='Size of the shared requests pool')
     p.set_defaults(func=mlx5_scan_accel_module)
+
+    # accel_error
+    def accel_error_inject_error(args):
+        rpc.accel.accel_error_inject_error(args.client, opcode=args.opcode,
+                                           type=args.type, count=args.count,
+                                           interval=args.interval, errcode=args.errcode)
+
+    p = subparsers.add_parser('accel_error_inject_error',
+                              help='Inject an error to processing accel operation')
+    p.add_argument('-o', '--opcode', help='Opcode')
+    p.add_argument('-t', '--type',
+                   help='Error type ("corrupt": corrupt the data, "failure": fail the operation, "disable": disable error injection)')
+    p.add_argument('-c', '--count', type=int,
+                   help='Number of errors to inject on each IO channel (0 to disable error injection)')
+    p.add_argument('-i', '--interval', type=int, help='Interval between injections')
+    p.add_argument('--errcode', type=int, help='Error code to inject (only relevant for type=failure)')
+    p.set_defaults(func=accel_error_inject_error)
 
     # opal
     def bdev_nvme_opal_init(args):
@@ -3422,6 +3510,12 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('--large-bufsize', help='size of a large buffer', type=int)
     p.set_defaults(func=iobuf_set_options)
 
+    def iobuf_get_stats(args):
+        print_dict(rpc.iobuf.iobuf_get_stats(args.client))
+
+    p = subparsers.add_parser('iobuf_get_stats', help='Display iobuf statistics')
+    p.set_defaults(func=iobuf_get_stats)
+
     def bdev_nvme_start_mdns_discovery(args):
         rpc.bdev.bdev_nvme_start_mdns_discovery(args.client,
                                                 name=args.name,
@@ -3523,6 +3617,11 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
 
     args = parser.parse_args()
 
+    try:
+        use_go_client = int(os.getenv('SPDK_JSONRPC_GO_CLIENT', 0)) == 1
+    except ValueError:
+        use_go_client = False
+
     if sys.stdin.isatty() and not hasattr(args, 'func'):
         # No arguments and no data piped through stdin
         parser.print_help()
@@ -3539,9 +3638,13 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                 continue
 
             try:
-                tmp_args.client = rpc.client.JSONRPCClient(
-                    tmp_args.server_addr, tmp_args.port, tmp_args.timeout,
-                    log_level=getattr(logging, tmp_args.verbose.upper()), conn_retries=tmp_args.conn_retries)
+                if use_go_client:
+                    tmp_args.client = rpc.client.JSONRPCGoClient(tmp_args.server_addr,
+                                                                 log_level=getattr(logging, tmp_args.verbose.upper()))
+                else:
+                    tmp_args.client = rpc.client.JSONRPCClient(
+                        tmp_args.server_addr, tmp_args.port, tmp_args.timeout,
+                        log_level=getattr(logging, tmp_args.verbose.upper()), conn_retries=tmp_args.conn_retries)
                 call_rpc_func(tmp_args)
                 print("**STATUS=0", flush=True)
             except JSONRPCException as ex:
@@ -3553,6 +3656,13 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
         print_dict = null_print
         print_json = null_print
         print_array = null_print
+    elif args.go_client or use_go_client:
+        try:
+            args.client = rpc.client.JSONRPCGoClient(args.server_addr,
+                                                     log_level=getattr(logging, args.verbose.upper()))
+        except JSONRPCException as ex:
+            print(ex.message)
+            exit(1)
     else:
         try:
             args.client = rpc.client.JSONRPCClient(args.server_addr, args.port, args.timeout,

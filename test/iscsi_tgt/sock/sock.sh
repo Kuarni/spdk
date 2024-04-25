@@ -8,61 +8,41 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
-function waitfortcp() {
+tcp_sock() {
+	local ap=$1 pid=$2 addr port proc
+	addr=${ap%:*} port=${ap#*:}
+
+	IFS="." read -ra addr <<< "$addr"
+	printf -v addr '%02X%02X%02X%02X:%04X' \
+		"${addr[3]}" "${addr[2]}" "${addr[1]}" "${addr[0]}" \
+		"$port"
+
+	[[ -e /proc/$pid/net/tcp ]] && proc=/proc/$pid/net/tcp || proc=/proc/net/tcp
+	[[ $(< "$proc") == *"$addr 00000000:0000 0A"* ]] # TCP_LISTEN == 0x0A
+}
+
+waitfortcp() {
 	local addr="$2"
-
-	if hash ip &> /dev/null; then
-		local have_ip_cmd=true
-	else
-		local have_ip_cmd=false
-	fi
-
-	if hash ss &> /dev/null; then
-		local have_ss_cmd=true
-	else
-		local have_ss_cmd=false
-	fi
 
 	echo "Waiting for process to start up and listen on address $addr..."
 	# turn off trace for this loop
 	xtrace_disable
-	local ret=0
-	local i
-	for ((i = 40; i != 0; i--)); do
+	local i=40
+	while ((i--)); do
 		# if the process is no longer running, then exit the script
 		#  since it means the application crashed
 		if ! kill -s 0 $1; then
 			echo "ERROR: process (pid: $1) is no longer running"
-			ret=1
-			break
+			return 1
 		fi
 
-		if $have_ip_cmd; then
-			namespace=$(ip netns identify $1)
-			if [ -n "$namespace" ]; then
-				ns_cmd="ip netns exec $namespace"
-			fi
-		fi
-
-		if $have_ss_cmd; then
-			if $ns_cmd ss -ln | grep -E -q "\s+$addr\s+"; then
-				break
-			fi
-		elif [[ "$(uname -s)" == "Linux" ]]; then
-			# For Linux, if system doesn't have ss, just assume it has netstat
-			if $ns_cmd netstat -an | grep -iw LISTENING | grep -E -q "\s+$addr\$"; then
-				break
-			fi
-		fi
+		tcp_sock "$addr" "$1" && return 0
 		sleep 0.5
 	done
-
 	xtrace_restore
-	if ((i == 0)); then
-		echo "ERROR: timeout while waiting for process (pid: $1) to start listening on '$addr'"
-		ret=1
-	fi
-	return $ret
+
+	echo "ERROR: timeout while waiting for process (pid: $1) to start listening on '$addr'"
+	return 1
 }
 
 iscsitestinit
@@ -87,7 +67,7 @@ waitfortcp $server_pid $INITIATOR_IP:$ISCSI_PORT
 
 # send message using hello_sock client
 message="**MESSAGE:This is a test message from the client**"
-response=$(echo $message | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix")
+response=$(echo "$message" | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix")
 
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
@@ -95,7 +75,7 @@ fi
 
 # send message using hello_sock client with zero copy disabled
 message="**MESSAGE:This is a test message from the client with zero copy disabled**"
-response=$(echo $message | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix" -z)
+response=$(echo "$message" | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix" -z)
 
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
@@ -103,7 +83,7 @@ fi
 
 # send message using hello_sock client with zero copy enabled
 message="**MESSAGE:This is a test message from the client with zero copy enabled**"
-response=$(echo $message | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix" -Z)
+response=$(echo "$message" | $HELLO_SOCK_APP -H $INITIATOR_IP -P $ISCSI_PORT -N "posix" -Z)
 
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
@@ -129,25 +109,25 @@ waitforlisten $server_pid
 
 # send message using hello_sock client
 message="**MESSAGE:This is a test message from the hello_sock client with ssl**"
-response=$(echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -m 0x2)
+response=$(echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -m 0x2)
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
 fi
 
 # send message using hello_sock client using TLS 1.3
 message="**MESSAGE:This is a test message from the hello_sock client with ssl using TLS 1.3**"
-response=$(echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -T 13 -m 0x2)
+response=$(echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -T 13 -m 0x2)
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
 fi
 
 # send message using hello_sock client using incorrect TLS 7
 message="**MESSAGE:This is a test message from the hello_sock client with ssl using incorrect TLS 7**"
-echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -T 7 -m 0x2 && exit 1
+echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -T 7 -m 0x2 && exit 1
 
 # send message using hello_sock client with KTLS disabled
 message="**MESSAGE:This is a test message from the hello_sock client with KTLS disabled**"
-response=$(echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -k -m 0x2)
+response=$(echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -k -m 0x2)
 if ! echo "$response" | grep -q "$message"; then
 	exit 1
 fi
@@ -159,12 +139,12 @@ fi
 # See GH issue #2687
 
 # message="**MESSAGE:This is a test message from the hello_sock client with KTLS enabled**"
-# echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -K
+# echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -K
 
 # send message using openssl client using TLS 1.3
 message="**MESSAGE:This is a test message from the openssl client using TLS 1.3**"
 response=$( (
-	echo -ne $message
+	echo -ne "$message"
 	sleep 2
 ) | $OPENSSL_APP s_client -debug -state -tlsextdebug -tls1_3 -psk_identity psk.spdk.io -psk "1234567890ABCDEF" -connect $TARGET_IP:$ISCSI_PORT)
 if ! echo "$response" | grep -q "$message"; then
@@ -173,11 +153,11 @@ fi
 
 # send message using hello_sock client with unmatching PSK KEY, expect a failure
 message="**MESSAGE:This is a test message from the hello_sock client with unmatching psk_key**"
-echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -E 4321DEADBEEF1234 -m 0x2 && exit 1
+echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -E 4321DEADBEEF1234 -m 0x2 && exit 1
 
 # send message using hello_sock client with unmatching PSK IDENTITY, expect a failure
 message="**MESSAGE:This is a test message from the hello_sock client with unmatching psk_key**"
-echo $message | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -I WRONG_PSK_ID -m 0x2 && exit 1
+echo "$message" | $HELLO_SOCK_APP -H $TARGET_IP -P $ISCSI_PORT $PSK -I WRONG_PSK_ID -m 0x2 && exit 1
 
 trap '-' SIGINT SIGTERM EXIT
 # NOTE: socat returns code 143 on SIGINT
@@ -199,7 +179,7 @@ waitforlisten $server_pid
 
 # send message to server using socat
 message="**MESSAGE:This is a test message to the server**"
-response=$(echo $message | $SOCAT_APP - tcp:$TARGET_IP:$ISCSI_PORT 2> /dev/null)
+response=$(echo "$message" | $SOCAT_APP - tcp:$TARGET_IP:$ISCSI_PORT 2> /dev/null)
 
 if [ "$message" != "$response" ]; then
 	exit 1

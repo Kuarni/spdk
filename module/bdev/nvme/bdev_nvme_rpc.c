@@ -70,6 +70,7 @@ static const struct spdk_json_object_decoder rpc_bdev_nvme_options_decoders[] = 
 	{"nvme_error_stat", offsetof(struct spdk_bdev_nvme_opts, nvme_error_stat), spdk_json_decode_bool, true},
 	{"rdma_srq_size", offsetof(struct spdk_bdev_nvme_opts, rdma_srq_size), spdk_json_decode_uint32, true},
 	{"io_path_stat", offsetof(struct spdk_bdev_nvme_opts, io_path_stat), spdk_json_decode_bool, true},
+	{"allow_accel_sequence", offsetof(struct spdk_bdev_nvme_opts, allow_accel_sequence), spdk_json_decode_bool, true},
 };
 
 static void
@@ -480,6 +481,12 @@ rpc_bdev_nvme_attach_controller(struct spdk_jsonrpc_request *request,
 							     ctx->req.psk);
 			goto cleanup;
 		}
+		rc = snprintf(ctx->req.bdev_opts.psk_path, sizeof(ctx->req.bdev_opts.psk_path), "%s", ctx->req.psk);
+		if (rc < 0 || (size_t)rc >= sizeof(ctx->req.bdev_opts.psk_path)) {
+			spdk_jsonrpc_send_error_response_fmt(request, -EINVAL, "Could not store PSK path: %s",
+							     ctx->req.psk);
+			goto cleanup;
+		}
 	}
 
 	if (ctx->req.hostaddr) {
@@ -703,6 +710,18 @@ static const struct spdk_json_object_decoder rpc_bdev_nvme_detach_controller_dec
 };
 
 static void
+rpc_bdev_nvme_detach_controller_done(void *arg, int rc)
+{
+	struct spdk_jsonrpc_request *request = arg;
+
+	if (rc == 0) {
+		spdk_jsonrpc_send_bool_response(request, true);
+	} else {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+	}
+}
+
+static void
 rpc_bdev_nvme_detach_controller(struct spdk_jsonrpc_request *request,
 				const struct spdk_json_val *params)
 {
@@ -803,14 +822,11 @@ rpc_bdev_nvme_detach_controller(struct spdk_jsonrpc_request *request,
 		snprintf(path.hostid.hostsvcid, maxlen, "%s", req.hostsvcid);
 	}
 
-	rc = bdev_nvme_delete(req.name, &path);
+	rc = bdev_nvme_delete(req.name, &path, rpc_bdev_nvme_detach_controller_done, request);
 
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
-		goto cleanup;
 	}
-
-	spdk_jsonrpc_send_bool_response(request, true);
 
 cleanup:
 	free_rpc_bdev_nvme_detach_controller(&req);
@@ -1430,6 +1446,7 @@ get_health_log_page_completion(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 	spdk_str_trim(buf);
 	spdk_json_write_named_string(w, "firmware_revision", buf);
 	spdk_json_write_named_string(w, "traddr", trid->traddr);
+	spdk_json_write_named_uint64(w, "critical_warning", health_page->critical_warning.raw);
 	spdk_json_write_named_uint64(w, "temperature_celsius", health_page->temperature - 273);
 	spdk_json_write_named_uint64(w, "available_spare_percentage", health_page->available_spare);
 	spdk_json_write_named_uint64(w, "available_spare_threshold_percentage",

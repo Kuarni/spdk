@@ -4,7 +4,7 @@
  *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 /* We have our own mock for this */
 #define UNIT_TEST_NO_VTOPHYS
 #include "common/lib/test_env.c"
@@ -50,7 +50,7 @@ spdk_reduce_vol_readv(struct spdk_reduce_vol *vol, struct iovec *iov, int iovcnt
 #include "bdev/compress/vbdev_compress.c"
 
 /* SPDK stubs */
-DEFINE_STUB(spdk_accel_get_opc_module_name, int, (enum accel_opcode opcode,
+DEFINE_STUB(spdk_accel_get_opc_module_name, int, (enum spdk_accel_opcode opcode,
 		const char **module_name), 0);
 DEFINE_STUB(spdk_accel_get_io_channel, struct spdk_io_channel *, (void), (void *)0xfeedbeef);
 DEFINE_STUB(spdk_bdev_get_aliases, const struct spdk_bdev_aliases_list *,
@@ -329,7 +329,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("compress", test_setup, test_cleanup);
@@ -340,9 +339,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_supported_io);
 	CU_ADD_TEST(suite, test_reset);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

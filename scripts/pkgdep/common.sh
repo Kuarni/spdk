@@ -109,14 +109,6 @@ install_markdownlint() {
 	fi
 }
 
-version-at-least() {
-	local atleastver="$1"
-	local askver="$2"
-	local smallest
-	smallest=$(echo -e "${atleastver}\n${askver}" | sort -V | head -n 1)
-	[[ "${smallest}" == "${atleastver}" ]]
-}
-
 install_protoc() {
 	local PROTOCVERSION=${PROTOCVERSION:-21.7}
 	local PROTOCGENGOVERSION=${PROTOCGENGOVERSION:-1.28}
@@ -144,7 +136,7 @@ install_protoc() {
 		echo "installing protoc v${PROTOCVERSION} to ${protocdir}"
 		mkdir -p "${protocdir}"
 		arch=x86_64
-		if [[ "$(arch)" == "aarch64" ]]; then
+		if [[ "$(uname -m)" == "aarch64" ]]; then
 			arch=aarch_64
 		fi
 		protocpkg=protoc-${PROTOCVERSION}-linux-${arch}.zip
@@ -184,13 +176,12 @@ install_protoc() {
 }
 
 install_golang() {
-	local GOVERSION=${GOVERSION:-1.19}
-	local godir gopkg gover arch
-	gover=$(go version 2> /dev/null | {
-		read -r _ _ v _
-		echo ${v#go}
-	})
-	if [[ -n "${gover}" ]] && version-at-least "${GOVERSION}" "${gover}"; then
+	local GOVERSION=${GOVERSION:-1.21.1}
+	local godir gopkg gover arch os
+
+	read -r _ _ gover _ < <(go version) || true
+	gover=${gover#go}
+	if [[ -n "${gover}" ]] && ge "${gover}" "${GOVERSION}"; then
 		echo "found go version ${gover} >= required ${GOVERSION}, skip installing"
 		return 0
 	fi
@@ -201,19 +192,40 @@ install_golang() {
 	fi
 	mkdir -p "${godir}"
 	arch=amd64
-	if [[ "$(arch)" == "aarch64" ]]; then
+	os=$(uname -s)
+	if [[ "$(uname -m)" == "aarch64" ]]; then
 		arch=arm64
 	fi
-	gopkg=go${GOVERSION}.linux-${arch}.tar.gz
+	gopkg=go${GOVERSION}.${os,,}-${arch}.tar.gz
 	echo "installing go v${GOVERSION} to ${godir}/bin"
-	curl -s https://dl.google.com/go/${gopkg} | tar -C "${godir}" -xzf - --strip 1
-	${godir}/bin/go version || {
+	curl -sL https://go.dev/dl/${gopkg} | tar -C "${godir}" -xzf - --strip 1
+	if ! "${godir}/bin/go" version; then
 		echo "go install failed"
 		return 1
-	}
+	fi
 	export PATH=${godir}/bin:$PATH
 	export GOBIN=${godir}/bin
 	pkgdep_toolpath go "${godir}/bin"
+}
+
+install_golangci_lint() {
+	local golangcidir installed_lintversion lintversion=${GOLANGCLILINTVERSION:-1.54.2}
+	installed_lintversion=$(golangci-lint --version | awk '{print $4}')
+
+	if [[ -n "${installed_lintversion}" ]] && ge "${installed_lintversion}" "${lintversion}"; then
+		echo "golangci-lint already installed, skip installing"
+		return 0
+	fi
+
+	echo "installing golangci-lint"
+	golangcidir=/opt/golangci/$lintversion/bin
+	export PATH=${golangcidir}:$PATH
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v${lintversion}/install.sh \
+		| sh -s -- -b "${golangcidir}" || {
+		echo "installing golangci-lint failed"
+		return 1
+	}
+	pkgdep_toolpath golangci_lint "${golangcidir}"
 }
 
 pkgdep_toolpath() {
@@ -257,5 +269,6 @@ fi
 
 if [[ $INSTALL_GOLANG == true ]]; then
 	install_golang
-	install_protoc
+	[[ $(uname -s) == Linux ]] && install_protoc
+	install_golangci_lint
 fi

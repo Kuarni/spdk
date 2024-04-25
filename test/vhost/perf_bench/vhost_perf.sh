@@ -331,7 +331,7 @@ if [[ "$ctrl_type" == "kernel_vhost" ]]; then
 	targetcli ls
 else
 	notice "Configuring SPDK vhost..."
-	vhost_run -n "${vhost_num}" -g ${vhost_bin_opt} -a "-p ${vhost_main_core} -m ${vhost_reactor_mask}"
+	vhost_run -n "${vhost_num}" -g ${vhost_bin_opt} -- -p "${vhost_main_core}" -m "${vhost_reactor_mask}"
 	notice "..."
 	if [[ ${#bpf_traces[@]} -gt 0 ]]; then
 		notice "Enabling BPF traces: ${bpf_traces[*]}"
@@ -466,6 +466,10 @@ done
 
 # Gather perf stats only from the vhost cpus
 perf_cpus=${vhost_reactor_mask//[\[\]]/}
+
+if [[ $ctrl_type == "kernel_vhost" ]]; then
+	limit_vhost_kernel_threads "$perf_cpus"
+fi
 
 # Run FIO traffic
 for fio_job in ${fio_jobs//,/ }; do

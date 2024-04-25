@@ -4,6 +4,8 @@
 #  All rights reserved.
 #
 
+[[ $(uname -s) == FreeBSD ]] && return 0
+
 NVMF_PORT=4420
 NVMF_SECOND_PORT=4421
 NVMF_THIRD_PORT=4422
@@ -12,6 +14,9 @@ NVMF_IP_LEAST_ADDR=8
 NVMF_TCP_IP_ADDRESS="127.0.0.1"
 NVMF_TRANSPORT_OPTS=""
 NVMF_SERIAL=SPDK00000000000001
+NVME_HOSTNQN=$(nvme gen-hostnqn)
+NVME_HOSTID=${NVME_HOSTNQN##*:}
+NVME_HOST=("--hostnqn=$NVME_HOSTNQN" "--hostid=$NVME_HOSTID")
 NVME_CONNECT="nvme connect"
 NET_TYPE=${NET_TYPE:-phy-fallback}
 
@@ -372,11 +377,11 @@ function gather_supported_nvmf_pci_devs() {
 	# All devices detected, kernel modules loaded. Now look under net class to see if there
 	# are any net devices bound to the controllers.
 	for pci in "${pci_devs[@]}"; do
-		if [[ ! -e /sys/bus/pci/devices/$pci/net ]]; then
+		pci_net_devs=("/sys/bus/pci/devices/$pci/net/"*)
+		if ((${#pci_net_devs[@]} == 0)); then
 			echo "No net devices associated with $pci"
 			continue
 		fi
-		pci_net_devs=("/sys/bus/pci/devices/$pci/net/"*)
 		pci_net_devs=("${pci_net_devs[@]##*/}")
 		echo "Found net devices under $pci: ${pci_net_devs[*]}"
 		net_devs+=("${pci_net_devs[@]}")
@@ -633,7 +638,7 @@ configure_kernel_target() {
 	ln -s "$kernel_subsystem" "$kernel_port/subsystems/"
 
 	# Check if target is available
-	nvme discover -a "$NVMF_INITIATOR_IP" -t "$TEST_TRANSPORT" -s "$NVMF_PORT"
+	nvme discover "${NVME_HOST[@]}" -a "$NVMF_INITIATOR_IP" -t "$TEST_TRANSPORT" -s "$NVMF_PORT"
 }
 
 clean_kernel_target() {

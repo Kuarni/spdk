@@ -7,7 +7,7 @@
 /* NVMF FC Transport Unit Test */
 
 #include "spdk/env.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/nvmf.h"
 #include "spdk/endian.h"
 #include "spdk/trace.h"
@@ -57,8 +57,6 @@ DEFINE_STUB(nvmf_ctrlr_async_event_ana_change_notice, int,
 	    (struct spdk_nvmf_ctrlr *ctrlr), 0);
 DEFINE_STUB_V(spdk_nvme_trid_populate_transport, (struct spdk_nvme_transport_id *trid,
 		enum spdk_nvme_transport_type trtype));
-DEFINE_STUB_V(spdk_nvmf_ctrlr_data_init, (struct spdk_nvmf_transport_opts *opts,
-		struct spdk_nvmf_ctrlr_data *cdata));
 DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req),
 	    -ENOSPC);
 
@@ -136,8 +134,6 @@ nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx)
 
 DEFINE_STUB_V(nvmf_fc_lld_start, (void));
 DEFINE_STUB(nvmf_fc_init_q, int, (struct spdk_nvmf_fc_hwqp *hwqp), 0);
-DEFINE_STUB_V(nvmf_fc_reinit_q, (void *queues_prev, void *queues_curr));
-DEFINE_STUB(nvmf_fc_init_rqpair_buffers, int, (struct spdk_nvmf_fc_hwqp *hwqp), 0);
 DEFINE_STUB(nvmf_fc_set_q_online_state, int, (struct spdk_nvmf_fc_hwqp *hwqp, bool online), 0);
 DEFINE_STUB(nvmf_fc_put_xchg, int, (struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri),
 	    0);
@@ -173,9 +169,6 @@ DEFINE_STUB_V(nvmf_fc_dump_all_queues, (struct spdk_nvmf_fc_hwqp *ls_queue,
 					struct spdk_nvmf_fc_hwqp *io_queues,
 					uint32_t num_io_queues,
 					struct spdk_nvmf_fc_queue_dump_info *dump_info));
-DEFINE_STUB_V(nvmf_fc_get_xri_info, (struct spdk_nvmf_fc_hwqp *hwqp,
-				     struct spdk_nvmf_fc_xchg_info *info));
-DEFINE_STUB(nvmf_fc_get_rsvd_thread, struct spdk_thread *, (void), NULL);
 
 uint32_t
 nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
@@ -428,7 +421,6 @@ main(int argc, char **argv)
 	unsigned int num_failures = 0;
 	CU_pSuite suite = NULL;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("NVMf-FC", nvmf_fc_tests_init, nvmf_fc_tests_fini);
@@ -441,9 +433,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, remove_hwqps_from_poll_groups_test);
 	CU_ADD_TEST(suite, destroy_transport_test);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	return num_failures;

@@ -8,7 +8,7 @@
 #include "spdk/nvme_spec.h"
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk_internal/mock.h"
 #include "thread/thread_internal.h"
 
@@ -213,6 +213,8 @@ DEFINE_STUB(spdk_bdev_is_zoned, bool, (const struct spdk_bdev *bdev), false);
 DEFINE_STUB(spdk_nvme_ns_get_format_index, uint32_t,
 	    (const struct spdk_nvme_ns_data *nsdata), 0);
 
+DEFINE_STUB(spdk_nvmf_subsystem_is_discovery, bool, (struct spdk_nvmf_subsystem *subsystem), false);
+
 int
 spdk_nvmf_qpair_disconnect(struct spdk_nvmf_qpair *qpair, nvmf_qpair_disconnect_cb cb_fn, void *ctx)
 {
@@ -327,7 +329,6 @@ test_get_log_page(void)
 	req.qpair = &qpair;
 	req.cmd = &cmd;
 	req.rsp = &rsp;
-	req.data = &data;
 	req.length = sizeof(data);
 	spdk_iov_one(req.iov, &req.iovcnt, &data, req.length);
 
@@ -364,7 +365,6 @@ test_get_log_page(void)
 	/* Get Log Page without data buffer */
 	memset(&cmd, 0, sizeof(cmd));
 	memset(&rsp, 0, sizeof(rsp));
-	req.data = NULL;
 	req.iovcnt = 0;
 	cmd.nvme_cmd.opc = SPDK_NVME_OPC_GET_LOG_PAGE;
 	cmd.nvme_cmd.cdw10_bits.get_log_page.lid = SPDK_NVME_LOG_ERROR;
@@ -372,7 +372,6 @@ test_get_log_page(void)
 	CU_ASSERT(nvmf_ctrlr_get_log_page(&req) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(req.rsp->nvme_cpl.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(req.rsp->nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_FIELD);
-	req.data = data;
 }
 
 static void
@@ -486,7 +485,6 @@ test_connect(void)
 	memset(&req, 0, sizeof(req));
 	req.qpair = &qpair;
 	req.xfer = SPDK_NVME_DATA_HOST_TO_CONTROLLER;
-	req.data = &connect_data;
 	req.length = sizeof(connect_data);
 	spdk_iov_one(req.iov, &req.iovcnt, &connect_data, req.length);
 	req.cmd = &cmd;
@@ -685,7 +683,8 @@ test_connect(void)
 
 	/* I/O connect to discovery controller */
 	memset(&rsp, 0, sizeof(rsp));
-	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY;
+	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY_CURRENT;
+	MOCK_SET(spdk_nvmf_subsystem_is_discovery, true);
 	subsystem.state = SPDK_NVMF_SUBSYSTEM_ACTIVE;
 	sgroups[subsystem.id].mgmt_io_outstanding++;
 	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
@@ -703,7 +702,8 @@ test_connect(void)
 	cmd.connect_cmd.qid = 0;
 	cmd.connect_cmd.kato = 120000;
 	memset(&rsp, 0, sizeof(rsp));
-	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY;
+	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY_CURRENT;
+	MOCK_SET(spdk_nvmf_subsystem_is_discovery, true);
 	subsystem.state = SPDK_NVMF_SUBSYSTEM_ACTIVE;
 	sgroups[subsystem.id].mgmt_io_outstanding++;
 	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
@@ -724,7 +724,8 @@ test_connect(void)
 	 */
 	cmd.connect_cmd.kato = 0;
 	memset(&rsp, 0, sizeof(rsp));
-	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY;
+	subsystem.subtype = SPDK_NVMF_SUBTYPE_DISCOVERY_CURRENT;
+	MOCK_SET(spdk_nvmf_subsystem_is_discovery, true);
 	subsystem.state = SPDK_NVMF_SUBSYSTEM_ACTIVE;
 	sgroups[subsystem.id].mgmt_io_outstanding++;
 	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
@@ -742,6 +743,7 @@ test_connect(void)
 	cmd.connect_cmd.qid = 1;
 	cmd.connect_cmd.kato = 120000;
 	subsystem.subtype = SPDK_NVMF_SUBTYPE_NVME;
+	MOCK_SET(spdk_nvmf_subsystem_is_discovery, false);
 
 	/* I/O connect to disabled controller */
 	memset(&rsp, 0, sizeof(rsp));
@@ -911,7 +913,6 @@ test_get_ns_id_desc_list(void)
 	req.cmd = &cmd;
 	req.rsp = &rsp;
 	req.xfer = SPDK_NVME_DATA_CONTROLLER_TO_HOST;
-	req.data = buf;
 	req.length = sizeof(buf);
 	spdk_iov_one(req.iov, &req.iovcnt, &buf, req.length);
 
@@ -1819,7 +1820,6 @@ test_custom_admin_cmd(void)
 	req.cmd = &cmd;
 	req.rsp = &rsp;
 	req.xfer = SPDK_NVME_DATA_CONTROLLER_TO_HOST;
-	req.data = buf;
 	req.length = sizeof(buf);
 	spdk_iov_one(req.iov, &req.iovcnt, &buf, req.length);
 
@@ -2323,7 +2323,6 @@ test_rae(void)
 		req[i].qpair = &qpair;
 		req[i].cmd = &cmd[i];
 		req[i].rsp = &rsp[i];
-		req[i].data = &data;
 		req[i].length = sizeof(data);
 		spdk_iov_one(req[i].iov, &req[i].iovcnt, &data, req[i].length);
 
@@ -2424,7 +2423,6 @@ test_nvmf_ctrlr_create_destruct(void)
 
 	req.qpair = &qpair;
 	req.xfer = SPDK_NVME_DATA_HOST_TO_CONTROLLER;
-	req.data = &connect_data;
 	req.length = sizeof(connect_data);
 	spdk_iov_one(req.iov, &req.iovcnt, &connect_data, req.length);
 	req.cmd = &cmd;
@@ -2954,7 +2952,6 @@ test_nvmf_ctrlr_get_features_host_behavior_support(void)
 	req.rsp = &rsp;
 
 	/* Invalid data */
-	req.data = NULL;
 	req.length = sizeof(struct spdk_nvme_host_behavior);
 	req.iovcnt = 0;
 
@@ -2962,10 +2959,8 @@ test_nvmf_ctrlr_get_features_host_behavior_support(void)
 	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(req.rsp->nvme_cpl.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(req.rsp->nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_FIELD);
-	CU_ASSERT(req.data == NULL);
 
 	/* Wrong structure length */
-	req.data = &behavior;
 	req.length = sizeof(struct spdk_nvme_host_behavior) - 1;
 	spdk_iov_one(req.iov, &req.iovcnt, &behavior, req.length);
 
@@ -2975,7 +2970,6 @@ test_nvmf_ctrlr_get_features_host_behavior_support(void)
 	CU_ASSERT(req.rsp->nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_FIELD);
 
 	/* Get Features Host Behavior Support Success */
-	req.data = &behavior;
 	req.length = sizeof(struct spdk_nvme_host_behavior);
 	spdk_iov_one(req.iov, &req.iovcnt, &behavior, req.length);
 
@@ -3072,7 +3066,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvmf", NULL, NULL);
@@ -3110,9 +3103,7 @@ main(int argc, char **argv)
 	allocate_threads(1);
 	set_thread(0);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	free_threads();

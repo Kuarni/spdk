@@ -10,6 +10,9 @@
 # Installation prefix
 CONFIG_PREFIX="/usr/local"
 
+# Destination directory for the Python libraries
+CONFIG_PYDIR=
+
 # Target architecture
 CONFIG_ARCH=native
 
@@ -223,3 +226,6 @@ CONFIG_AVAHI=n
 
 # Setup DPDK's RTE_MAX_LCORES
 CONFIG_MAX_LCORES=
+
+# Build all Go components
+CONFIG_GOLANG=n

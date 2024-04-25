@@ -64,7 +64,7 @@ DEPDIRS-blobfs := log thread blob trace util
 DEPDIRS-event := log util thread $(JSON_LIBS) trace init
 DEPDIRS-init := jsonrpc json log rpc thread util
 
-DEPDIRS-ftl := log util thread bdev trace
+DEPDIRS-ftl := log util thread bdev trace json jsonrpc
 DEPDIRS-nbd := log util thread $(JSON_LIBS) bdev
 ifeq ($(CONFIG_UBLK),y)
 DEPDIRS-ublk := log util thread $(JSON_LIBS) bdev
@@ -103,15 +103,16 @@ endif
 DEPDIRS-accel_ioat := log ioat thread jsonrpc rpc accel
 DEPDIRS-accel_dsa := log idxd thread $(JSON_LIBS) accel trace
 DEPDIRS-accel_iaa := log idxd thread $(JSON_LIBS) accel trace
-DEPDIRS-accel_dpdk_cryptodev := log thread $(JSON_LIBS) accel
+DEPDIRS-accel_dpdk_cryptodev := log thread $(JSON_LIBS) accel util
 DEPDIRS-accel_dpdk_compressdev := log thread $(JSON_LIBS) accel util
+DEPDIRS-accel_error := accel $(JSON_LIBS) thread util
 
 ifeq ($(CONFIG_RDMA_PROV),mlx5_dv)
 DEPDIRS-accel_mlx5 := accel thread log mlx5 rdma util
 endif
 
 # module/env_dpdk
-DEPDIRS-env_dpdk_rpc := log $(JSON_LIBS)
+DEPDIRS-env_dpdk_rpc := $(JSON_LIBS)
 
 # module/sock
 DEPDIRS-sock_posix := log sock util

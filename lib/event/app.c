@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021, 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -47,6 +47,8 @@ struct spdk_app {
 	bool				stopped;
 	const char			*rpc_addr;
 	const char			**rpc_allowlist;
+	FILE				*rpc_log_file;
+	enum spdk_log_level		rpc_log_level;
 	int				shm_id;
 	spdk_app_shutdown_cb		shutdown_cb;
 	int				rc;
@@ -109,6 +111,8 @@ static const struct option g_cmdline_options[] = {
 	{"pci-allowed",			required_argument,	NULL, PCI_ALLOWED_OPT_IDX},
 #define PCI_WHITELIST_OPT_IDX	'W'
 	{"pci-whitelist",		required_argument,	NULL, PCI_WHITELIST_OPT_IDX}, /* deprecated */
+#define INTERRUPT_MODE_OPT_IDX 256
+	{"interrupt-mode",		no_argument,		NULL, INTERRUPT_MODE_OPT_IDX},
 #define SILENCE_NOTICELOG_OPT_IDX 257
 	{"silence-noticelog",		no_argument,		NULL, SILENCE_NOTICELOG_OPT_IDX},
 #define WAIT_FOR_RPC_OPT_IDX	258
@@ -236,8 +240,11 @@ spdk_app_opts_init(struct spdk_app_opts *opts, size_t opts_size)
 	SET_FIELD(num_entries, SPDK_APP_DEFAULT_NUM_TRACE_ENTRIES);
 	SET_FIELD(delay_subsystem_init, false);
 	SET_FIELD(disable_signal_handlers, false);
+	SET_FIELD(interrupt_mode, false);
 	/* Don't set msg_mempool_size here, it is set or calculated later */
 	SET_FIELD(rpc_allowlist, NULL);
+	SET_FIELD(rpc_log_file, NULL);
+	SET_FIELD(rpc_log_level, SPDK_LOG_DISABLED);
 #undef SET_FIELD
 }
 
@@ -292,6 +299,8 @@ app_start_application(void)
 static void
 app_start_rpc(int rc, void *arg1)
 {
+	struct spdk_rpc_opts opts;
+
 	if (rc) {
 		spdk_app_stop(rc);
 		return;
@@ -299,7 +308,11 @@ app_start_rpc(int rc, void *arg1)
 
 	spdk_rpc_set_allowlist(g_spdk_app.rpc_allowlist);
 
-	rc = spdk_rpc_initialize(g_spdk_app.rpc_addr);
+	opts.size = SPDK_SIZEOF(&opts, log_level);
+	opts.log_file = g_spdk_app.rpc_log_file;
+	opts.log_level = g_spdk_app.rpc_log_level;
+
+	rc = spdk_rpc_initialize(g_spdk_app.rpc_addr, &opts);
 	if (rc) {
 		spdk_app_stop(rc);
 		return;
@@ -486,6 +499,7 @@ app_setup_trace(struct spdk_app_opts *opts)
 static void
 bootstrap_fn(void *arg1)
 {
+	struct spdk_rpc_opts opts;
 	int rc;
 
 	if (g_spdk_app.json_config_file) {
@@ -499,7 +513,11 @@ bootstrap_fn(void *arg1)
 		} else {
 			spdk_rpc_set_allowlist(g_spdk_app.rpc_allowlist);
 
-			rc = spdk_rpc_initialize(g_spdk_app.rpc_addr);
+			opts.size = SPDK_SIZEOF(&opts, log_level);
+			opts.log_file = g_spdk_app.rpc_log_file;
+			opts.log_level = g_spdk_app.rpc_log_level;
+
+			rc = spdk_rpc_initialize(g_spdk_app.rpc_addr, &opts);
 			if (rc) {
 				spdk_app_stop(rc);
 				return;
@@ -547,13 +565,16 @@ app_copy_opts(struct spdk_app_opts *opts, struct spdk_app_opts *opts_user, size_
 	SET_FIELD(log);
 	SET_FIELD(base_virtaddr);
 	SET_FIELD(disable_signal_handlers);
+	SET_FIELD(interrupt_mode);
 	SET_FIELD(msg_mempool_size);
 	SET_FIELD(rpc_allowlist);
 	SET_FIELD(vf_token);
+	SET_FIELD(rpc_log_file);
+	SET_FIELD(rpc_log_level);
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 224, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 236, "Incorrect size");
 
 #undef SET_FIELD
 }
@@ -725,11 +746,17 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 	}
 #endif
 
+	if (opts->interrupt_mode) {
+		spdk_interrupt_mode_enable();
+	}
+
 	memset(&g_spdk_app, 0, sizeof(g_spdk_app));
 	g_spdk_app.json_config_file = opts->json_config_file;
 	g_spdk_app.json_config_ignore_errors = opts->json_config_ignore_errors;
 	g_spdk_app.rpc_addr = opts->rpc_addr;
 	g_spdk_app.rpc_allowlist = opts->rpc_allowlist;
+	g_spdk_app.rpc_log_file = opts->rpc_log_file;
+	g_spdk_app.rpc_log_level = opts->rpc_log_level;
 	g_spdk_app.shm_id = opts->shm_id;
 	g_spdk_app.shutdown_cb = opts->shutdown_cb;
 	g_spdk_app.rc = 0;
@@ -823,6 +850,13 @@ spdk_app_fini(void)
 }
 
 static void
+subsystem_fini_done(void *arg1)
+{
+	spdk_rpc_finish();
+	spdk_reactors_stop(NULL);
+}
+
+static void
 _start_subsystem_fini(void *arg1)
 {
 	if (g_scheduling_in_progress) {
@@ -830,7 +864,7 @@ _start_subsystem_fini(void *arg1)
 		return;
 	}
 
-	spdk_subsystem_fini(spdk_reactors_stop, NULL);
+	spdk_subsystem_fini(subsystem_fini_done, NULL);
 }
 
 static int
@@ -860,7 +894,6 @@ app_stop(void *arg1)
 		return;
 	}
 
-	spdk_rpc_finish();
 	g_spdk_app.stopped = true;
 	spdk_log_for_each_deprecation(NULL, log_deprecation_hits);
 	_start_subsystem_fini(NULL);
@@ -938,6 +971,7 @@ usage(void (*app_usage)(void))
 	printf("     --vfio-vf-token       VF token (UUID) shared between SR-IOV PF and VFs for vfio_pci driver\n");
 	spdk_log_usage(stdout, "-L");
 	spdk_trace_mask_usage(stdout, "-e");
+	printf("     --interrupt-mode      set app to interrupt mode (Warning: CPU usage will be reduced only if all pollers in the app support interrupt mode)\n");
 	if (app_usage) {
 		app_usage();
 	}
@@ -988,8 +1022,13 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 	if (app_getopt_str != NULL) {
 		ch = app_opts_validate(app_getopt_str);
 		if (ch) {
-			SPDK_ERRLOG("Duplicated option '%c' between the generic and application specific spdk opts.\n",
+			SPDK_ERRLOG("Duplicated option '%c' between app-specific command line parameter and generic spdk opts.\n",
 				    ch);
+			goto out;
+		}
+
+		if (!app_parse) {
+			SPDK_ERRLOG("Parse function is required when app-specific command line parameters are provided.\n");
 			goto out;
 		}
 	}
@@ -1141,7 +1180,7 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 		case LOGFLAG_OPT_IDX:
 			rc = spdk_log_set_flag(optarg);
 			if (rc < 0) {
-				SPDK_ERRLOG("unknown flag\n");
+				SPDK_ERRLOG("unknown flag: %s\n", optarg);
 				usage(app_usage);
 				goto out;
 			}
@@ -1217,6 +1256,9 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 		case ENV_VF_TOKEN_OPT_IDX:
 			opts->vf_token = optarg;
 			break;
+		case INTERRUPT_MODE_OPT_IDX:
+			opts->interrupt_mode = true;
+			break;
 		case VERSION_OPT_IDX:
 			printf(SPDK_VERSION_STRING"\n");
 			retval = SPDK_APP_PARSE_ARGS_HELP;
@@ -1230,9 +1272,14 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 			usage(app_usage);
 			goto out;
 		default:
+			if (!app_parse) {
+				SPDK_ERRLOG("Unsupported app-specific command line parameter '%c'.\n", ch);
+				goto out;
+			}
+
 			rc = app_parse(ch, optarg);
 			if (rc) {
-				SPDK_ERRLOG("Parsing application specific arguments failed: %d\n", rc);
+				SPDK_ERRLOG("Parsing app-specific command line parameter '%c' failed: %d\n", ch, rc);
 				goto out;
 			}
 		}
